@@ -1,0 +1,1415 @@
+# Machine-readable description of the openshift-dpf automation repo's settings
+# (everything `make generate-env` writes to .env).
+#
+# Lives in dpf-dev-gui for now; describes openshift-dpf as of d9e333f (2026-10-06). If the
+# automation repo ships its own ci/env.schema.yaml, the app prefers that one.
+#
+#   parameters     every setting in ci/env.template: what it does, its type,
+#                  allowed values, units, default and when it is required
+#   not_templated  settings the scripts read that ci/env.template does not carry
+#                  (so they cannot be set through generate-env today)
+#   removed        settings that used to exist, why they went away, and what
+#                  replaces them
+#
+# repository: web URL of openshift-dpf; removed_in commits link to <repository>/commit/<sha>.
+#
+# Field reference (parameters):
+#   description      what the setting controls, in plain words
+#   group            key into `groups` (display grouping)
+#   type             string | integer | boolean | enum | ipv4 | cidr | mac | url |
+#                    image | image-repo | path | version | dns-label | domain |
+#                    namespace | k8s-name
+#   values           allowed values (type: enum)
+#   unit, min, max   for numbers
+#   default          literal default from ci/env.defaults
+#   default_expr     default computed from other settings (shell expansion)
+#   required         must be set; required_when: only under that condition
+#   common           commonly changed (worth showing first)
+#   per_environment  usually differs per lab environment / hypervisor
+#   secret           do not display the value
+#   deprecated       still accepted but has no effect (the value explains why)
+#   pulled           an image the deployment pulls: true, or the condition it's pulled
+#                    under (same syntax as required_when; conditions can be joined with
+#                    `and`). The app checks your pull secrets can read it.
+#   tag              (image-repo) the setting holding the tag pulled from this repo
+#   notes            important constraints or gotchas
+#   WORKER_{N}_*     one entry per physical-worker field; `instances` lists the
+#                    N values ci/env.template has slots for
+#
+# Check it against an openshift-dpf checkout: python -m dpfgui.check_schema <repo>
+
+schema_version: 1
+# Where removed_in commits (and the rest of the repo) can be browsed.
+repository: https://github.com/rh-ecosystem-edge/openshift-dpf
+groups:
+  cluster: Cluster
+  bridge: Hypervisor bridge
+  paths: Repo paths
+  dpf: DPF
+  kata: Kata containers
+  operators: Operators
+  hosted: Hosted (DPU) cluster
+  network: Network
+  credentials: Pull secrets and keys
+  dpu-services: DPU services (HBN, DTS)
+  vms: Control-plane VMs
+  vm-workers: Worker VMs
+  timeouts: Timeouts
+  storage: Storage
+  workers: Physical workers (DPU hosts)
+  upgrade: Upgrades
+  verification: Verification and tests
+  provisioner: DPF HCP provisioner
+parameters:
+
+  DEPLOYMENT_PROFILE:
+    description: >-
+      dpf = full DPF deployment. nno = plain base OpenShift cluster without DPF pull secret, DPU networks,
+      NFD, cert-manager and DPU worker bits.
+    group: cluster
+    type: enum
+    values:
+    - dpf
+    - nno
+    default: dpf
+
+  CLUSTER_NAME:
+    description: >-
+      Name of the management cluster in Assisted Installer; the API becomes api.<CLUSTER_NAME>.<BASE_DOMAIN>.
+    group: cluster
+    type: dns-label
+    required: true
+    common: true
+    per_environment: true
+
+  BASE_DOMAIN:
+    description: >-
+      DNS domain of the management cluster. Arbitrary for lab setups; the api name is written to /etc/hosts.
+    group: cluster
+    type: domain
+    required: true
+    common: true
+
+  OPENSHIFT_VERSION:
+    description: >-
+      OpenShift version of the management cluster (Assisted Installer). -multi also creates an alternate-arch
+      InfraEnv. ≥4.22 enables the flannel pod CIDR.
+    group: cluster
+    type: version
+    default: 4.22.11-multi
+    common: true
+
+  OLM_WORKAROUND:
+    description: >-
+      Install operators like LVMS from the previous minor's redhat-operators catalog, for brand-new OCP
+      versions whose catalog isn't ready.
+    group: cluster
+    type: boolean
+    default: false
+
+  BRIDGE_NAME:
+    description: >-
+      Linux bridge on the hypervisor that every VM NIC is attached to. Must already exist unless SKIP_BRIDGE_CONFIG=false.
+    group: bridge
+    type: string
+    default: mgmt-br
+    common: true
+    per_environment: true
+
+  SKIP_BRIDGE_CONFIG:
+    description: >-
+      true (default): never touch the hypervisor bridge, including its MTU. false: create-vms rebuilds
+      host networking as root (rarely what you want on a shared hypervisor).
+    group: bridge
+    type: boolean
+    default: true
+
+  MANIFESTS_DIR:
+    description: >-
+      Root directory of the source manifest templates (cluster-installation, dpf-installation, post-installation,
+      kata, gitops-operator, etc.), relative to the repo root. The scripts read templates from it.
+    group: paths
+    type: path
+    default: manifests
+    notes: >-
+      Must keep the repo's subdirectory layout. post-install.sh derives the post-installation and observability
+      dirs from it.
+
+  GENERATED_DIR:
+    description: >-
+      Output directory for rendered manifests (subscriptions, DPFOperatorConfig, kata, worker-provisioning,
+      post-install). Scripts write processed templates here before applying them.
+    group: paths
+    type: path
+    default: manifests/generated
+    notes: >-
+      Wiped with rm -rf by prepare-manifests and clean. Do not point it at anything you want to keep.
+
+  POST_INSTALL_DIR:
+    description: Meant to be the source directory of the post-installation (DPU) manifest templates.
+    group: paths
+    type: path
+    default: manifests/post-installation
+    deprecated: 'Ignored: post-install.sh always overwrites it with ${MANIFESTS_DIR}/post-installation.'
+
+  GENERATED_POST_INSTALL_DIR:
+    description: Meant to be the output directory for rendered post-installation manifests.
+    group: paths
+    type: path
+    default: manifests/generated/post-install
+    deprecated: 'Ignored: post-install.sh always overwrites it with ${GENERATED_DIR}/post-install.'
+
+  SSH_KEY:
+    description: >-
+      Public key (.pub) installed on the management nodes and the hosted cluster. Use an absolute path;
+      a literal ~ is not expanded everywhere.
+    group: credentials
+    type: path
+    default: ~/.ssh/id_ed25519.pub
+
+  DPF_VERSION:
+    description: DPF operator helm chart version.
+    group: dpf
+    type: version
+    default: v26.4.1
+
+  DPF_HELM_REPO_URL:
+    description: >-
+      Where the DPF operator Helm chart comes from. An oci:// value uses <url>/dpf-operator, a helm.ngc.nvidia.com
+      URL is added as a Helm repo, and anything else is treated as a legacy <url>-<DPF_VERSION>.tgz prefix.
+    group: dpf
+    type: url
+    default: https://helm.ngc.nvidia.com/nvidia/doca
+    notes: DPF_VERSION is used as the chart version in the oci and NGC modes.
+
+  OVN_CHART_URL:
+    description: >-
+      OCI registry base for the OVN-Kubernetes chart, used to install the OVN resource injector and as
+      the OVN chartRepoURL in the DPUServiceTemplate overrides.
+    group: dpf
+    type: url
+    default: oci://ghcr.io/mellanox/charts
+    notes: An OCI base without the chart name, e.g. oci://ghcr.io/mellanox/charts.
+
+  OVN_TEMPLATE_CHART_URL:
+    group: dpf
+    type: url
+    default: oci://ghcr.io/mellanox/charts
+    deprecated: 'Has no effect: nothing reads it (left over after the OVN manifest-generation cleanup).'
+
+  OVN_CHART_VERSION:
+    description: >-
+      OVN-Kubernetes DPU chart version (also the injector chart default). Applied via DPUServiceTemplate
+      overrides.
+    group: dpf
+    type: version
+    default: v26.4-ocp-beta4-kata
+
+  OVN_DAEMONSET_VERSION:
+    group: dpf
+    type: version
+    default: ''
+    deprecated: 'Has no effect: nothing reads it.'
+
+  OVN_KUBERNETES_IMAGE_REPO:
+    group: dpf
+    type: image-repo
+    deprecated: >-
+      Has no effect: scripts/env.sh fills it from the aarch64 release payload, but nothing uses the value.
+
+  OVN_KUBERNETES_IMAGE_TAG:
+    group: dpf
+    type: string
+    deprecated: >-
+      Has no effect: scripts/env.sh resolves it from the aarch64 release payload when empty, but nothing
+      uses the value.
+
+  OVN_KUBERNETES_UTILS_IMAGE_REPO:
+    group: dpf
+    type: image-repo
+    default: ''
+    deprecated: 'Has no effect: nothing reads it.'
+
+  OVN_KUBERNETES_UTILS_IMAGE_TAG:
+    group: dpf
+    type: string
+    default: ''
+    deprecated: 'Has no effect: nothing reads it.'
+
+  SRIOV_DP_RESOURCE_PREFIX:
+    description: >-
+      Extended-resource prefix for SR-IOV VF pools (defaultResourcePrefix in the DPFOperatorConfig). The
+      default injector resource names are built from it.
+    group: dpf
+    type: string
+    default: openshift.io
+    notes: INJECTOR_RESOURCE_NAME and KATA_INJECTOR_RESOURCE_NAME must use the same prefix.
+
+  SRIOV_DP_CONFIG_NAME:
+    description: >-
+      Name of the main RDMA VF pool in the NodeSRIOVDevicePluginConfig (PF0 VFs 2..NUM_VFS-1 plus the
+      regular PF1 VFs). Pods request it as <prefix>/<name>.
+    group: dpf
+    type: string
+    default: bf3_vfs
+    notes: >-
+      A resource name, not an object name: underscores are allowed and used on purpose to work around
+      a GPU Operator bug.
+
+  SRIOV_DP_CONFIG_CR_NAME:
+    description: >-
+      metadata.name of the NodeSRIOVDevicePluginConfig CR, referenced by the DPUDeployment and looked
+      up by enable-kata.
+    group: dpf
+    type: k8s-name
+    default_expr: ${SRIOV_DP_CONFIG_NAME//_/-}
+    notes: >-
+      Must be RFC 1123 (lowercase, '-', '.'; no underscores). Defaults to SRIOV_DP_CONFIG_NAME with '_'
+      replaced by '-'.
+
+  SRIOV_DP_MGMT_POOL_NAME:
+    description: Name of the single-VF management pool (PF0 VF 1) in the NodeSRIOVDevicePluginConfig.
+    group: dpf
+    type: string
+    default: bf3-p0-vfs-mgmt
+    notes: >-
+      Must stay bf3-p0-vfs-mgmt: the vendored OVN-Kubernetes chart hardcodes this resource request, and
+      renaming it breaks host-side OVN pods.
+
+  INJECTOR_RESOURCE_NAME:
+    description: >-
+      Extended resource the OVN resource-injector webhook adds to regular pods on the DPU-accelerated
+      network.
+    group: dpf
+    type: string
+    default_expr: ${SRIOV_DP_RESOURCE_PREFIX}/${SRIOV_DP_CONFIG_NAME}
+    notes: Must equal <SRIOV_DP_RESOURCE_PREFIX>/<SRIOV_DP_CONFIG_NAME>.
+
+  INJECTOR_CHART_VERSION:
+    description: >-
+      Version of the ovn-kubernetes-chart installed from OVN_CHART_URL to enable the resource injector.
+    group: dpf
+    type: version
+    default_expr: ${OVN_CHART_VERSION}
+    notes: Defaults to OVN_CHART_VERSION.
+
+  OVNK_NAMESPACE:
+    description: >-
+      Namespace of the ovn-kubernetes injector Helm release, where the dpf-ovn-kubernetes and kata NetworkAttachmentDefinitions
+      are expected.
+    group: dpf
+    type: namespace
+    default: openshift-ovn-kubernetes
+
+  NUM_VFS:
+    description: SR-IOV VFs per DPU PF.
+    group: dpf
+    type: integer
+    min: 1
+    default: 46
+
+  KATA_ENABLED:
+    description: >-
+      Enable Kata cold-plug: splits PF1 VFs into a kata pool and adds the enable-kata step to make all.
+      Applies an RHCOS layer that can downgrade workers if mismatched.
+    group: kata
+    type: boolean
+    default: false
+
+  KATA_SRIOV_DP_CONFIG_NAME:
+    description: >-
+      Name of the VF pool for Kata pods (the last KATA_NUM_VFS VFs of PF KATA_SRIOV_PF_INDEX). Only used
+      when KATA_ENABLED=true.
+    group: kata
+    type: string
+    default: bf3-p1-vfs-kata
+
+  KATA_SRIOV_PF_INDEX:
+    description: PF whose top VFs are carved out for the Kata VF pool when KATA_ENABLED=true.
+    group: kata
+    type: integer
+    default: 1
+    notes: >-
+      Only 1 is consistent: the template always shrinks the PF1 regular range, so other values overlap
+      the PF0 pools.
+
+  KATA_NUM_VFS:
+    description: PF1 VFs reserved for Kata; must be less than NUM_VFS.
+    group: kata
+    type: integer
+    min: 0
+    default: 24
+
+  KATA_RUNTIME_CLASS:
+    description: >-
+      Name and CRI-O handler of the RuntimeClass for Kata cold-plug pods; the injector maps pods using
+      it to the Kata NAD and VF resource.
+    group: kata
+    type: k8s-name
+    default: kata-coldplug
+    notes: >-
+      Must match the CRI-O runtime 'kata-coldplug' hardcoded in manifests/kata/04-kata-coldplug.yaml.
+
+  KATA_INJECTOR_RESOURCE_NAME:
+    description: >-
+      Extended resource the injector adds to pods whose runtimeClassName is KATA_RUNTIME_CLASS. Only used
+      when KATA_ENABLED=true.
+    group: kata
+    type: string
+    default_expr: ${SRIOV_DP_RESOURCE_PREFIX}/${KATA_SRIOV_DP_CONFIG_NAME}
+    notes: Must equal <SRIOV_DP_RESOURCE_PREFIX>/<KATA_SRIOV_DP_CONFIG_NAME>.
+
+  KATA_NAD_NAME:
+    description: >-
+      Name of the NetworkAttachmentDefinition the injector chart creates in OVNK_NAMESPACE for Kata pods.
+    group: kata
+    type: k8s-name
+    default_expr: dpf-ovn-kubernetes-${KATA_RUNTIME_CLASS}
+
+  KATA_RHCOS_LAYER_IMAGE:
+    pulled: KATA_ENABLED == true and KATA_SKIP_RHCOS_LAYER != true
+    description: >-
+      RHCOS layered OS image with a patched kata-containers RPM, applied to the worker-dpu pool via MachineConfig
+      99-kata-dpu-layered.
+    group: kata
+    type: image
+    default: >-
+      quay.io/jensfr/rhcos-kata-dpu@sha256:ce05dea3e0214c7bf7864cef1110e414a6419430fe2f55b5e9c848b71b799a8f
+    notes: >-
+      Build it from the cluster's RHCOS digest; a mismatched (older) image makes MCO rebase, and possibly
+      downgrade, the DPU workers.
+
+  KATA_SKIP_RHCOS_LAYER:
+    description: >-
+      Skip the RHCOS layer MachineConfig (and delete a leftover one). For z-streams whose kata-containers
+      RPM already has the cold-plug patches.
+    group: kata
+    type: boolean
+    default: false
+
+  KATA_TEST_REPLICAS:
+    description: >-
+      Replicas of the kata-dpu-test Deployment created by make deploy-kata-test; each uses one Kata VF,
+      and 0 scales it down.
+    group: kata
+    type: integer
+    min: 0
+    default: 1
+
+  GITOPS_OPERATOR_CHANNEL:
+    description: >-
+      OpenShift GitOps operator subscription channel without the 'gitops-' prefix (1.21 becomes gitops-1.21).
+    group: operators
+    type: string
+    default: '1.21'
+    notes: Only applied if the GitOps subscription doesn't exist yet.
+
+  GITOPS_OPERATOR_VERSION:
+    description: >-
+      Starting CSV version of the OpenShift GitOps subscription (openshift-gitops-operator.<value>).
+    group: operators
+    type: version
+    default: v1.21.3
+    notes: Include the leading 'v' (e.g. v1.21.3); it must belong to GITOPS_OPERATOR_CHANNEL.
+
+  MAINTENANCE_OPERATOR_VERSION:
+    description: >-
+      Version of the maintenance-operator chart (oci://ghcr.io/mellanox/maintenance-operator-chart) installed
+      into dpf-operator-system.
+    group: operators
+    type: version
+    default: 0.3.0
+    notes: No 'v' prefix (e.g. 0.3.0). Skipped if the release already exists.
+
+  HYPERSHIFT_INSTALL_METHOD:
+    description: >-
+      Install HyperShift with the hypershift CLI (binary) or via the MultiCluster Engine operator (mce).
+    group: hosted
+    type: enum
+    values:
+    - binary
+    - mce
+    default: binary
+
+  MCE_OPERATOR_CHANNEL:
+    description: MultiCluster Engine subscription channel; only used when HYPERSHIFT_INSTALL_METHOD=mce.
+    group: hosted
+    type: string
+    default: stable-2.17
+    notes: Falls back to the package's default channel if the catalog doesn't offer it.
+
+  HYPERSHIFT_IMAGE:
+    pulled: HYPERSHIFT_INSTALL_METHOD != mce
+    description: >-
+      HyperShift operator image. With the binary install method the hypershift CLI is extracted from it
+      (x86_64 hosts only) and passed to 'hypershift install'.
+    group: hosted
+    type: image
+    default: quay.io/hypershift/hypershift-operator:latest
+    notes: Ignored when HYPERSHIFT_INSTALL_METHOD=mce.
+
+  HOSTED_CLUSTER_NAME:
+    description: >-
+      Name of the hosted DPU cluster. Its admin kubeconfig secret is <name>-admin-kubeconfig. If you change
+      it, also change HOSTED_CONTROL_PLANE_NAMESPACE.
+    group: hosted
+    type: dns-label
+    default: doca
+
+  CLUSTERS_NAMESPACE:
+    description: >-
+      Management-cluster namespace holding the DPFHCPProvisioner CR, the HostedCluster, and the pull/SSH
+      secrets it references.
+    group: hosted
+    type: namespace
+    default: clusters
+    notes: >-
+      If you change it, also set HOSTED_CONTROL_PLANE_NAMESPACE to <CLUSTERS_NAMESPACE>-<HOSTED_CLUSTER_NAME>.
+
+  HOSTED_CONTROL_PLANE_NAMESPACE:
+    description: >-
+      Namespace of the hosted control plane. Not derived automatically: must be <CLUSTERS_NAMESPACE>-<HOSTED_CLUSTER_NAME>.
+    group: hosted
+    type: string
+    default: clusters-doca
+
+  OCP_RELEASE_IMAGE:
+    pulled: true
+    description: >-
+      OpenShift release of the hosted (DPU) cluster. Independent of OPENSHIFT_VERSION; keep it aligned
+      with BLUEFIELD_OCP_IMAGE and the BFB.
+    group: hosted
+    type: image
+    default: quay.io/openshift-release-dev/ocp-release:4.22.7-multi
+    common: true
+
+  DISABLE_HCP_CAPS:
+    group: hosted
+    type: string
+    default: 'false'
+    deprecated: 'Has no effect: defined but never read.'
+
+  DPF_CLUSTER_TYPE:
+    group: hosted
+    type: string
+    default: hypershift
+    deprecated: 'Has no effect: defined but never read.'
+
+  POD_CIDR:
+    group: network
+    type: cidr
+    default: 10.128.0.0/14
+    deprecated: 'Has no effect: the pod network is hardcoded to 10.128.0.0/14 in the OVN manifests.'
+
+  SERVICE_CIDR:
+    group: network
+    type: cidr
+    default: 172.30.0.0/16
+    deprecated: 'Has no effect: the service network is hardcoded to 172.30.0.0/16 in the OVN manifests.'
+
+  FLANNEL_POD_CIDR:
+    description: >-
+      Pod CIDR of the hosted DPU cluster's Flannel (OPENSHIFT_VERSION ≥ 4.22). Must not overlap the management
+      pod network 10.128.0.0/14.
+    group: network
+    type: cidr
+    default: 10.132.0.0/14
+
+  DPU_HOST_CIDR:
+    description: >-
+      Subnet the DPU hosts (the physical x86 workers) live in; given to OVN as the host CIDR. Required
+      for the dpf profile.
+    group: network
+    type: cidr
+    required_when: DEPLOYMENT_PROFILE == dpf
+    common: true
+    per_environment: true
+
+  API_VIP:
+    description: >-
+      Management cluster API VIP. Only used for multi-node (VM_COUNT>1). Must be a free IP in the bridge's
+      subnet.
+    group: network
+    type: ipv4
+    default: ''
+    required_when: VM_COUNT > 1
+    common: true
+    per_environment: true
+
+  INGRESS_VIP:
+    description: >-
+      Management cluster ingress (*.apps) VIP. Only used for multi-node (VM_COUNT>1). Must be free, in
+      the bridge's subnet, and differ from API_VIP.
+    group: network
+    type: ipv4
+    default: ''
+    required_when: VM_COUNT > 1
+    common: true
+    per_environment: true
+
+  VTEP_CIDR:
+    description: >-
+      Your slice of the shared HBN switch (from dpf-allocations): VTEP addresses for OVN/HBN on the high-speed
+      fabric, one /29 per DPU node.
+    group: network
+    type: cidr
+    default: 10.0.120.0/22
+    common: true
+
+  NODES_MTU:
+    description: >-
+      MTU of the whole cluster: VM NICs, DPF control-plane & high-speed networks, OVN (minus 100) and
+      HBN. 9000 also selects the jumbo DPUFlavor. The hypervisor bridge must carry it.
+    group: network
+    type: enum
+    values:
+    - 1500
+    - 9000
+    unit: bytes
+    default: 1500
+    common: true
+    per_environment: true
+
+  PRIMARY_IFACE:
+    description: >-
+      NIC name inside the VMs that MTU/static-IP NMState is applied to. Only used when NODES_MTU≠1500
+      or VM_STATIC_IP=true; must match the virtio NIC name RHCOS assigns.
+    group: network
+    type: string
+    default: enp1s0
+
+  HYPERSHIFT_API_IP:
+    description: >-
+      LoadBalancer IP (via MetalLB) for the hosted DPU cluster's API. Empty = NodePort. Must be a free
+      IP in the management subnet.
+    group: network
+    type: ipv4
+    default: ''
+    per_environment: true
+
+  OPENSHIFT_PULL_SECRET:
+    description: >-
+      Path on the hypervisor to your Red Hat pull secret JSON (relative paths are relative to the automation
+      repo). Used for Assisted Installer, helm and the hosted cluster.
+    group: credentials
+    type: path
+    default: openshift_pull.json
+    common: true
+    per_environment: true
+
+  DPF_PULL_SECRET:
+    description: >-
+      Path on the hypervisor to the NVIDIA NGC pull secret JSON (needs nvcr.io credentials). dpf profile
+      only.
+    group: credentials
+    type: path
+    default: pull-secret.txt
+    common: true
+    per_environment: true
+
+  HBN_HOSTNAME_NODE1:
+    group: dpu-services
+    type: string
+    deprecated: 'Has no effect: traffic-flow tests pick nodes automatically.'
+
+  HBN_HOSTNAME_NODE2:
+    group: dpu-services
+    type: string
+    deprecated: 'Has no effect: traffic-flow tests pick nodes automatically.'
+
+  HBN_HELM_REPO_URL:
+    description: >-
+      HBN chart repository URL for the DPUServiceTemplate overrides consumed by the HCP provisioner.
+    group: dpu-services
+    type: url
+    default: https://helm.ngc.nvidia.com/nvidia/doca
+    notes: >-
+      Only used when overrides are generated (GENERATE_DPUSERVICETEMPLATE_OVERRIDES=true or make generate-overrides).
+
+  HBN_HELM_CHART_VERSION:
+    description: HBN chart version for the DPUServiceTemplate overrides.
+    group: dpu-services
+    type: version
+    default: 3.4.0
+    notes: Only used when overrides are generated.
+
+  HBN_IMAGE_REPO:
+    pulled: GENERATE_DPUSERVICETEMPLATE_OVERRIDES == true
+    tag: HBN_IMAGE_TAG
+    description: HBN image repository for the DPUServiceTemplate overrides.
+    group: dpu-services
+    type: image-repo
+    default: nvcr.io/nvidia/doca/doca_hbn
+    notes: Only used when overrides are generated.
+
+  HBN_IMAGE_TAG:
+    description: HBN image tag for the DPUServiceTemplate overrides.
+    group: dpu-services
+    type: string
+    default: 3.4.0-doca3.4.0
+    notes: Only used when overrides are generated.
+
+  DTS_HELM_REPO_URL:
+    description: DOCA Telemetry Service chart repository URL for the DPUServiceTemplate overrides.
+    group: dpu-services
+    type: url
+    default: https://helm.ngc.nvidia.com/nvidia/doca
+    notes: Only used when overrides are generated.
+
+  DTS_HELM_CHART_VERSION:
+    description: DOCA Telemetry Service chart version for the DPUServiceTemplate overrides.
+    group: dpu-services
+    type: version
+    default: 1.25.5
+    notes: Only used when overrides are generated.
+
+  DTS_IMAGE:
+    pulled: GENERATE_DPUSERVICETEMPLATE_OVERRIDES == true
+    description: DOCA Telemetry Service image (repo and tag) for the DPUServiceTemplate overrides.
+    group: dpu-services
+    type: image
+    default: nvcr.io/nvidia/doca/doca_telemetry:1.25.5-doca3.4.0
+    notes: Only used when overrides are generated.
+
+  LIBVIRT_HOST:
+    description: >-
+      Run VMs on another host over qemu+ssh (user@host). Leave empty when make runs on the hypervisor
+      itself, as here.
+    group: vms
+    type: string
+    default: ''
+
+  VM_PREFIX:
+    description: >-
+      Name prefix of the control-plane VMs (<prefix>1..N). make clean-all deletes every VM whose name
+      starts with it.
+    group: vms
+    type: string
+    default_expr: vm-${DEPLOYMENT_PROFILE}
+    common: true
+
+  VM_COUNT:
+    description: >-
+      Number of control-plane VMs. 1 = single-node OpenShift (VIPs unused, single-replica hosted control
+      plane). >1 needs API_VIP and INGRESS_VIP; ODF needs ≥3.
+    group: vms
+    type: integer
+    min: 1
+    max: 9
+    default: 3
+    common: true
+
+  RAM:
+    description: Memory per control-plane VM, in MiB (virt-install --memory). 64000 ≈ 62.5 GiB.
+    group: vms
+    type: integer
+    unit: MiB
+    min: 32768
+    default: 41984
+    common: true
+
+  VCPUS:
+    description: vCPUs per control-plane VM.
+    group: vms
+    type: integer
+    min: 1
+    default: 14
+    common: true
+
+  DISK_SIZE1:
+    description: OS disk size of each VM, in GiB (thin-provisioned qcow2).
+    group: vms
+    type: integer
+    unit: GiB
+    min: 1
+    default: 120
+    common: true
+
+  DISK_SIZE2:
+    description: Second disk of each VM, in GiB. LVMS/LSO use it for the hosted cluster's etcd storage.
+    group: vms
+    type: integer
+    unit: GiB
+    min: 1
+    default: 80
+
+  MAC_PREFIX:
+    description: >-
+      Fixes bytes 4–5 of VM MACs (52:54:00:XX:XX:idx) so DHCP reservations stay stable. Empty = derived
+      from the machine-id of where make runs.
+    group: vms
+    type: string
+
+  VM_STATIC_IP:
+    description: >-
+      Give the control-plane VMs static IPs instead of DHCP. Needs VM_EXT_IPS, VM_EXT_PL, VM_GW and VM_DNS,
+      which generate-env does not carry over.
+    group: vms
+    type: boolean
+    default: false
+
+  VM_WORKER_COUNT:
+    description: >-
+      Number of extra worker VMs (day-2 Assisted Installer flow). Not the physical DPU workers.
+    group: vm-workers
+    type: integer
+    min: 0
+    default: 0
+
+  VM_WORKER_PREFIX:
+    description: >-
+      Name prefix of the day-2 worker VMs. make clean-all deletes every VM whose name starts with it.
+    group: vm-workers
+    type: string
+    default_expr: ${VM_PREFIX}-worker
+
+  VM_WORKER_RAM:
+    description: Memory per worker VM, in MiB. Defaults to RAM.
+    group: vm-workers
+    type: integer
+    unit: MiB
+    default_expr: ${RAM}
+
+  VM_WORKER_VCPUS:
+    description: vCPUs of each day-2 worker VM (when VM_WORKER_COUNT > 0).
+    group: vm-workers
+    type: integer
+    min: 1
+    default_expr: ${VCPUS}
+
+  VM_WORKER_DISK_SIZE1:
+    description: OS disk size of each day-2 worker VM.
+    group: vm-workers
+    type: integer
+    unit: GiB
+    default_expr: ${DISK_SIZE1}
+
+  VM_WORKER_DISK_SIZE2:
+    description: Second disk size of each day-2 worker VM.
+    group: vm-workers
+    type: integer
+    unit: GiB
+    default_expr: ${DISK_SIZE2}
+
+  MAX_RETRIES:
+    group: timeouts
+    type: integer
+    default: 90
+    deprecated: >-
+      Has no effect: the Assisted Installer status wait uses a hardcoded 120 retries; this only appears
+      in a debug log line.
+
+  SLEEP_TIME:
+    group: timeouts
+    type: integer
+    unit: seconds
+    default: 60
+    deprecated: >-
+      Has no effect: the Assisted Installer status wait uses a hardcoded 60 s; this only appears in a
+      debug log line.
+
+  DISK_PATH:
+    description: Directory on the hypervisor where VM disks are created.
+    group: vms
+    type: path
+    default: /var/lib/libvirt/images
+
+  ISO_FOLDER:
+    description: Directory on the hypervisor where the discovery ISO is downloaded.
+    group: vms
+    type: path
+    default: /var/lib/libvirt/images
+
+  ISO_TYPE:
+    description: Which Assisted Installer discovery ISO to boot the VMs from.
+    group: vms
+    type: enum
+    values:
+    - minimal
+    - full
+    default: minimal
+
+  STATIC_NET_FILE:
+    description: >-
+      Where the NMState config for the control-plane VMs (static IPs and/or MTU) is generated before it's
+      passed to Assisted Installer.
+    group: vms
+    type: path
+    default_expr: ${GENERATED_DIR}/static_net.yaml
+    notes: Generated output; overwritten on every run.
+
+  WORKER_STATIC_NET_FILE:
+    description: Where the NMState (MTU) config for day-2 worker VMs is generated.
+    group: vms
+    type: path
+    default_expr: ${GENERATED_DIR}/worker_static_net.yaml
+    notes: Generated only when VM_WORKER_COUNT > 0 and NODES_MTU isn't 1500.
+
+  STORAGE_TYPE:
+    description: >-
+      Storage for the hosted cluster's etcd on the management cluster: LVMS (lvm) or LSO+ODF (odf, needs
+      VM_COUNT ≥ 3, otherwise silently lvm).
+    group: storage
+    type: enum
+    values:
+    - lvm
+    - odf
+    default: lvm
+
+  SKIP_DEPLOY_STORAGE:
+    description: >-
+      Don't install LVMS/ODF; use an existing StorageClass named by ETCD_STORAGE_CLASS (which you'd have
+      to add yourself).
+    group: storage
+    type: boolean
+    default: false
+
+  BFB_STORAGE_CLASS:
+    group: storage
+    type: string
+    default: lvms-vg1
+    deprecated: 'Has no effect: defined but never read.'
+
+  BFB_URL:
+    description: >-
+      BlueField BFB image the DPUs are flashed with. Required for the dpf profile; should match the hosted
+      cluster version.
+    group: storage
+    type: url
+    default: >-
+      https://rhcos.mirror.openshift.com/art/storage/prod/streams/rhel-10.2/builds/10.2.20260715-0/aarch64/rhcos-10.2.20260715-0-nvidiabluefield.aarch64.bfb
+    required_when: DEPLOYMENT_PROFILE == dpf
+    common: true
+
+  BLUEFIELD_OCP_IMAGE:
+    pulled: true
+    description: >-
+      RHCOS/OCP layer image the DPUs run (machineOSURL). Must match the hosted cluster's OpenShift version.
+    group: hosted
+    type: image
+    default: quay.io/edge-infrastructure/bluefield-ocp:4.22.7
+    common: true
+
+  KUBECONFIG:
+    description: >-
+      Where the management cluster kubeconfig is written, relative to the automation repo. `make clean`
+      deletes it.
+    group: cluster
+    type: path
+    default: ./kubeconfig
+
+  TARGETCLUSTER_API_SERVER_HOST:
+    group: cluster
+    type: string
+    deprecated: 'Has no effect: in the template but never read.'
+
+  WORKER_COUNT:
+    description: >-
+      Number of physical bare-metal workers (WORKER_1…N, the DPU hosts) to power on and provision. 0 skips
+      worker provisioning.
+    group: workers
+    type: integer
+    min: 0
+    default: 0
+    common: true
+    per_environment: true
+
+  ENABLE_SHORT_WORKER_HOSTNAMES:
+    description: Rename every worker node once to worker-<MAC>.
+    group: workers
+    type: boolean
+    default: false
+
+  WORKER_NODE_LABELS:
+    description: Labels applied to the workers.
+    group: workers
+    type: string
+    default: k8s.ovn.org/dpu-host=
+
+  WORKER_POWER_ON_DELAY:
+    description: >-
+      Seconds to wait after powering on physical workers before provisioning (lets hosts/DPUs settle).
+    group: workers
+    type: integer
+    unit: s
+    min: 0
+    default: 180
+
+  WORKER_{N}_NAME:
+    description: >-
+      BareMetalHost name of this physical worker. An existing BMH with the same name is skipped, not updated.
+    group: workers
+    type: string
+    common: true
+    per_environment: true
+    instances:
+    - 1
+    - 2
+
+  WORKER_{N}_BMC_IP:
+    description: BMC address (IPMI power control + Redfish virtual media). The BMC needs both.
+    group: workers
+    type: ipv4
+    common: true
+    per_environment: true
+    instances:
+    - 1
+    - 2
+
+  WORKER_{N}_BMC_USER:
+    description: BMC username.
+    group: workers
+    type: string
+    common: true
+    per_environment: true
+    instances:
+    - 1
+    - 2
+
+  WORKER_{N}_BMC_PASSWORD:
+    description: BMC password.
+    group: workers
+    type: string
+    common: true
+    per_environment: true
+    secret: true
+    instances:
+    - 1
+    - 2
+
+  WORKER_{N}_BOOT_MAC:
+    description: MAC of the worker's boot/provisioning NIC. Changing it later needs a full reprovision.
+    group: workers
+    type: mac
+    common: true
+    per_environment: true
+    instances:
+    - 1
+    - 2
+
+  WORKER_{N}_ROOT_DEVICE:
+    description: >-
+      Install disk hint (rootDeviceHints.deviceName). Use a stable path if /dev/sdX naming varies.
+    group: workers
+    type: string
+    instances:
+    - 1
+    - 2
+
+  WORKER_{N}_REDFISH_SYSTEM_PATH:
+    group: workers
+    type: string
+    deprecated: 'Has no effect: never read.'
+    instances:
+    - 1
+    - 2
+
+  WORKER_{N}_DPU:
+    description: Whether this worker has a DPU (true by default for the dpf profile).
+    group: workers
+    type: boolean
+    instances:
+    - 1
+    - 2
+
+  AUTO_APPROVE_WORKER_CSR:
+    description: >-
+      Deploy a CronJob that approves every pending CSR each minute (all CSRs, not just workers'). Convenient
+      for dev clusters.
+    group: workers
+    type: boolean
+    default: false
+
+  MANAGEMENT_UPGRADE_TARGET_VERSION:
+    description: Target for `make upgrade-management`. Empty = current z+1.
+    group: upgrade
+    type: string
+    default: ''
+
+  VERIFY_DEPLOYMENT:
+    description: >-
+      Run post-deploy checks (workers joined, DPU objects, DPUDeployment, cluster stability) at the end
+      of make all.
+    group: verification
+    type: boolean
+    default: false
+
+  VERIFY_MAX_RETRIES:
+    description: >-
+      Maximum attempts for each deployment-verification check and for waiting on the hosted cluster API.
+    group: verification
+    type: integer
+    min: 1
+    default: 60
+
+  VERIFY_SLEEP_SECONDS:
+    description: Delay between verification retries.
+    group: verification
+    type: integer
+    unit: seconds
+    min: 1
+    default: 30
+
+  SKIP_ETC_HOSTS:
+    description: Don't write api.<cluster>.<domain> into /etc/hosts on the hypervisor.
+    group: cluster
+    type: boolean
+    default: false
+
+  TFT_REPO_REV:
+    description: Branch, tag or commit of kubernetes-traffic-flow-tests used by make traffic-flow-tests.
+    group: verification
+    type: string
+    default: main
+
+  TFT_TEST_CASES:
+    description: >-
+      Traffic-flow test cases to run, as comma-separated IDs, ranges or names (e.g. 1-25,32-34,69).
+    group: verification
+    type: string
+    default: 1-25,32-34,69
+
+  TFT_DURATION:
+    description: Duration of each traffic-flow test case.
+    group: verification
+    type: integer
+    unit: seconds
+    min: 1
+    default: 10
+
+  TFT_CONNECTION_TYPE:
+    description: Traffic generator and connection type for the traffic-flow tests.
+    group: verification
+    type: enum
+    values:
+    - iperf-tcp
+    - iperf-udp
+    - netperf-tcp-stream
+    - netperf-tcp-rr
+    - http
+    default: iperf-tcp
+
+  TFT_HOST_NETWORK_NAMESPACE:
+    group: verification
+    type: namespace
+    default: openshift-host-network
+    deprecated: 'Has no effect: nothing reads it.'
+
+  SANITY_TESTS_OVN_ENABLED:
+    description: >-
+      Also run the OVN connectivity tests (pod-to-pod, service, cross-node, mp0 pings) in make run-dpf-sanity.
+    group: verification
+    type: boolean
+    default: true
+
+  SANITY_TESTS_OVN_IMAGE:
+    description: Image for the OVN sanity-test pods (needs ping and curl).
+    group: verification
+    type: image
+    default: registry.redhat.io/openshift4/network-tools-rhel9:latest
+
+  SANITY_TESTS_OVN_NAMESPACE:
+    description: >-
+      Namespace the OVN sanity tests create for their pods; it's deleted before and after the run.
+    group: verification
+    type: namespace
+    default: ovn-test-sanity
+    notes: 'Don''t point it at a real namespace: the tests delete it.'
+
+  SANITY_TESTS_OVN_PING_COUNT:
+    description: ICMP echo packets per OVN sanity ping test.
+    group: verification
+    type: integer
+    min: 1
+    default: 3
+
+  SANITY_TESTS_PING_COUNT:
+    description: ICMP echo packets per SR-IOV/HBN sanity ping test.
+    group: verification
+    type: integer
+    min: 1
+    default: 20
+
+  SANITY_TESTS_PING_HBN_TO_HBN_PODS:
+    description: >-
+      Also ping between doca-hbn pods on different DPU workers (at MTU 1490 and 8970) in the sanity tests.
+    group: verification
+    type: boolean
+    default: false
+
+  SANITY_TESTS_PODS_WORKLOAD_FILE:
+    description: >-
+      Manifest applied when the sanity workload namespace doesn't exist yet; it creates the SR-IOV test
+      Deployments.
+    group: verification
+    type: path
+    default: manifests/testing/workload.yaml
+    notes: The default manifests/testing/workload.yaml hardcodes namespace 'workload'.
+
+  SANITY_TESTS_WORKLOAD_NAMESPACE:
+    description: Namespace where the sanity tests expect the SR-IOV workload pods.
+    group: verification
+    type: namespace
+    default: workload
+    notes: Must match the namespace inside SANITY_TESTS_PODS_WORKLOAD_FILE (default 'workload').
+
+  DPU_WORKER_CONFIG_CHART_URL:
+    description: >-
+      OCI chart of the dpu-worker-config Helm release, installed into DPF_HCP_PROVISIONER_OPERATOR_NAMESPACE.
+    group: provisioner
+    type: url
+    default: >-
+      oci://quay.io/redhat-user-workloads/dpu-kit-for-nvidia-operator-tenant/dpu-worker-config-chart-main
+
+  DPU_WORKER_CONFIG_CHART_VERSION:
+    description: Version of the dpu-worker-config chart. Empty = the newest one.
+    group: provisioner
+    type: version
+    default: ''
+
+  GENERATE_DPUSERVICETEMPLATE_OVERRIDES:
+    description: >-
+      Create the dpuservicetemplate-overrides ConfigMap from the OVN/HBN/DTS chart and image settings
+      during prepare-dpu-files.
+    group: provisioner
+    type: boolean
+    default: false
+    notes: make generate-overrides writes it regardless of this flag.
+
+  DPF_HCP_PROVISIONER_OPERATOR_CHART_URL:
+    description: Helm chart of the DPF HCP provisioner operator.
+    group: provisioner
+    type: url
+    default: oci://quay.io/redhat-user-workloads/dpu-kit-for-nvidia-operator-tenant/chart
+
+  DPF_HCP_PROVISIONER_OPERATOR_NAMESPACE:
+    description: >-
+      Namespace of the DPF HCP provisioner operator, the dpu-worker-config release and the dpuservicetemplate-overrides
+      ConfigMap.
+    group: provisioner
+    type: namespace
+    default: dpf-hcp-provisioner-system
+
+  DPF_HCP_PROVISIONER_OPERATOR_VERSION:
+    description: >-
+      Chart version of the provisioner operator. Empty = highest semver in the registry ("latest" is invalid).
+    group: provisioner
+    type: string
+    default: ''
+
+  DPF_HCP_PROVISIONER_OPERATOR_IMAGE_REPO:
+    pulled: true
+    tag: DPF_HCP_PROVISIONER_OPERATOR_IMAGE_TAG
+    description: Image repository of the DPF HCP provisioner operator (override to test your own build).
+    group: provisioner
+    type: string
+    default: >-
+      quay.io/redhat-user-workloads/dpu-kit-for-nvidia-operator-tenant/dpf-hcp-provisioner-rhel10-operator
+
+  DPF_HCP_PROVISIONER_OPERATOR_IMAGE_TAG:
+    description: Image tag of the DPF HCP provisioner operator.
+    group: provisioner
+    type: string
+    default: latest
+
+  DPFHCPPROVISIONER_PULL_SECRET_NAME:
+    description: >-
+      Name of the Secret created in CLUSTERS_NAMESPACE from OPENSHIFT_PULL_SECRET and used as the hosted
+      cluster's pull secret.
+    group: provisioner
+    type: k8s-name
+    default: my-pull-secret
+    notes: An existing Secret with this name isn't updated.
+
+  DPFHCPPROVISIONER_SSH_SECRET_NAME:
+    description: >-
+      Name of the Secret created in CLUSTERS_NAMESPACE from SSH_KEY for SSH access to the hosted cluster.
+    group: provisioner
+    type: k8s-name
+    default: my-ssh-key
+    notes: An existing Secret with this name isn't updated.
+
+  CUSTOM_POSTINSTALL_SCRIPT:
+    description: >-
+      Command run as the last step of make all: a path (containing /) or http(s) URL, plus arguments split
+      on spaces.
+    group: cluster
+    type: string
+    default: ''
+not_templated:
+
+  ETCD_STORAGE_CLASS:
+    description: >-
+      StorageClass for the hosted control plane's etcd. Defaults to lvms-vg1 (lvm) or ocs-storagecluster-ceph-rbd
+      (odf).
+    type: k8s-name
+    used_in: scripts/env.sh:211
+    notes: Required when SKIP_DEPLOY_STORAGE=true.
+
+  VM_EXT_IPS:
+    description: Comma-separated static IPv4 addresses, one per control-plane VM (VM_STATIC_IP=true).
+    type: string
+    used_in: scripts/cluster.sh:113
+
+  VM_EXT_PL:
+    description: Prefix length of the static VM network (VM_STATIC_IP=true).
+    type: integer
+    used_in: scripts/cluster.sh:106
+
+  VM_GW:
+    description: Default gateway for statically addressed VMs (VM_STATIC_IP=true).
+    type: ipv4
+    used_in: scripts/cluster.sh:130
+
+  VM_DNS:
+    description: Comma-separated DNS servers for statically addressed VMs (VM_STATIC_IP=true).
+    type: string
+    used_in: scripts/cluster.sh:135
+
+  CNO_HCP_IMAGE:
+    description: Overrides the cluster-network-operator image in the hosted control plane.
+    type: image
+    used_in: scripts/dpf.sh:350
+
+  DISABLE_NFD:
+    description: Skip the NFD manifest during DPF deployment.
+    type: boolean
+    used_in: scripts/dpf.sh:455
+
+  CATALOG_SOURCE_NAME:
+    description: >-
+      OLM CatalogSource for operator subscriptions (LVM, MCE, ...). Defaults to redhat-operators; forced
+      to the previous minor's catalog when OLM_WORKAROUND=true.
+    type: k8s-name
+    used_in: scripts/env.sh:259
+
+  HOST_CLUSTER_API:
+    description: >-
+      Management cluster API hostname used in generated manifests and /etc/hosts. Defaults to api.<CLUSTER_NAME>.<BASE_DOMAIN>.
+    type: string
+    used_in: scripts/env.sh:254
+
+  STRICT_WEBHOOK_CHECK:
+    description: >-
+      Set to false to keep applying post-install manifests even if the DPF webhook readiness check fails.
+    type: boolean
+    used_in: scripts/post-install.sh:307
+
+  HELM_VERSION:
+    description: Helm version to install when helm is missing (empty = latest).
+    type: version
+    used_in: scripts/tools.sh:28
+
+  DPU_UPGRADE_BFB_URL:
+    description: BFB used by make upgrade-dpu. Defaults to the current BFB's URL.
+    type: url
+    used_in: scripts/upgrade-dpu.sh:209
+
+  HOSTED_UPGRADE_TARGET_VERSION:
+    description: OCP version for make upgrade-hosted. Defaults to the next z-stream.
+    type: version
+    used_in: scripts/upgrade-hosted.sh:202
+removed:
+
+  HBN_OVN_NETWORK:
+    removed_in: a040a15
+    date: 2026-08-26
+    replaced_by: VTEP_CIDR
+    reason: >-
+      Renamed. The value feeds both the DPUServiceIPAM pool and OVN's vtepCIDR, and upstream DPF calls
+      it VTEP_CIDR. Same meaning and format.
+
+  USE_V419_WORKAROUND:
+    removed_in: 212b247
+    date: 2026-04-09
+    replaced_by: OLM_WORKAROUND
+    reason: >-
+      Generalized. The previous-minor catalog is now derived from OPENSHIFT_VERSION instead of being hardcoded
+      to 4.19.
+
+  ARGOCD_CHART_VERSION:
+    removed_in: 0c77d05
+    date: 2025-10-23
+    replaced_by: GITOPS_OPERATOR_VERSION
+    reason: >-
+      The upstream Argo CD helm chart was replaced by the Red Hat OpenShift GitOps operator (see also
+      GITOPS_OPERATOR_CHANNEL).
+
+  HELM_CHART_VERSION:
+    removed_in: a0f1ff4
+    date: 2025-08-10
+    replaced_by: DPF_VERSION
+    reason: DPF charts moved to an OCI registry; the chart version is now DPF_VERSION.
+
+  AUTO_APPROVE_DPUCLUSTER_CSR:
+    removed_in: '6932935'
+    date: 2026-03-12
+    reason: No longer needed; the DPF HCP provisioner approves the DPU cluster's CSRs itself.
+
+  CSR_APPROVAL_TIMEOUT:
+    removed_in: 0890aea
+    date: 2026-02-09
+    reason: >-
+      CSR auto-approval was redesigned (see AUTO_APPROVE_WORKER_CSR) and no longer has a timeout.
+
+  DMS_HOSTAGENT_IMAGE:
+    removed_in: ffd3a92
+    date: 2026-03-10
+    reason: Workaround image for a hostdriver bug, no longer needed since DPF 26.4.
+
+  DPU_INTERFACE:
+    removed_in: 32a5470
+    date: 2026-02-24
+    reason: No longer used by anything.
+
+  DPU_OVN_VF:
+    removed_in: 3b9f77e
+    date: 2026-02-25
+    reason: Was never used.
+
+  ENABLE_BLUEFIELD_VALIDATION:
+    removed_in: a61bd41
+    date: 2026-03-23
+    reason: Removed together with the DPFHCPProvisionerConfig CR it configured (NVIDIA-505).
+
+  ENABLE_HCP_MULTUS:
+    removed_in: dec3f5d
+    date: 2026-03-02
+    reason: Was not used by anything.
+
+  NFD_OPERAND_IMAGE:
+    removed_in: dec3f5d
+    date: 2026-03-02
+    reason: Was not used by anything; NFD is installed from its OLM subscription.
+
+  NFD_OPERATOR_IMAGE:
+    removed_in: e735407
+    date: 2025-07-16
+    reason: NFD is installed from an OLM subscription instead of custom operator images.
+
+  INJECTOR_NODE_LABEL:
+    removed_in: 9eda3f6
+    date: 2026-03-10
+    reason: The OVN-Kubernetes resource injector no longer relies on a custom node label.
+
+  NFS_PATH:
+    removed_in: ada9628
+    date: 2026-03-16
+    reason: BFB images no longer need an NFS volume.
+
+  NFS_SERVER_NODE_IP:
+    removed_in: ada9628
+    date: 2026-03-16
+    reason: BFB images no longer need an NFS volume.
+
+  KAMAJI_VIP:
+    removed_in: bb3a5c8
+    date: 2025-04-23
+    reason: >-
+      Belonged to the old Kamaji-based hosted control plane; the hosted cluster now runs on HyperShift
+      (its API LoadBalancer IP is HYPERSHIFT_API_IP).
+
+  LIBVIRT_NETWORK:
+    removed_in: 0635e92
+    date: 2025-05-19
+    reason: Never shipped; VMs attach to the bridge named by BRIDGE_NAME.

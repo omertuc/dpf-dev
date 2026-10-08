@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# The DPF Dev command line (creates the virtualenv / installs dependencies when needed).
+set -euo pipefail
+here="$(dirname "$(readlink -f "$0")")"
+[ -x "$here/.venv/bin/python" ] || python3 -m venv "$here/.venv"
+"$here/.venv/bin/python" -c 'import fastapi, uvicorn, yaml' 2>/dev/null || (cd "$here" && .venv/bin/pip install -q -e .)
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" exec "$here/.venv/bin/python" -m dpfgui.cli "$@"

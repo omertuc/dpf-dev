@@ -1,0 +1,7 @@
+@pierre/trees 1.0.0-beta.6 (Apache-2.0, see pierre-trees.LICENSE.md and pierre-trees.NOTICE.md): the file tree in the cluster view's MachineConfig files.
+pierre-trees.mjs is esm.sh's self-contained browser bundle of it (https://esm.sh/@pierre/trees@1.0.0-beta.6/es2022/trees.bundle.mjs).
+
+shiki-pierre.mjs: the syntax highlighter, built from shiki-pierre.entry.mjs (Shiki 4.5.0, MIT, see
+shiki.LICENSE; @pierre/theme 2.0.0, Apache-2.0, see pierre-theme.LICENSE and pierre-theme.NOTICE.md)
+with: npm install shiki@4.5.0 @pierre/theme@2.0.0 esbuild@0.25 &&
+      npx esbuild shiki-pierre.entry.mjs --bundle --format=esm --minify --target=es2022 --outfile=shiki-pierre.mjs --legal-comments=eof

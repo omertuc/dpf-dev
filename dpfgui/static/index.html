@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DPF Dev</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b5bd6'/%3E%3Cpath d='M9 10h14M9 16h14M9 22h8' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <div class="brand-name">DPF Dev</div>
+        <div class="brand-sub">deployment console</div>
+      </div>
+    </div>
+    <div class="side-label">Profiles</div>
+    <nav id="profiles" class="profiles"></nav>
+    <button class="side-btn" id="new-profile"><span data-icon="plus"></span>New profile</button>
+    <div class="side-spacer"></div>
+    <button class="side-btn" id="identity" title="Which GitHub users are you"></button>
+    <button class="side-btn" id="theme-toggle"><span data-icon="contrast"></span><span id="theme-label">Theme: auto</span></button>
+    <div class="side-hint"><kbd>R</kbd> refresh · <kbd>L</kbd> log · <kbd>E</kbd> settings</div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="empty-state" id="empty" hidden>
+      <h2>No hypervisors yet</h2>
+      <p>Add one to get started.</p>
+    </div>
+  </main>
+</div>
+
+<!-- Feedback bubble; dismissing it collapses it to the avatar, which brings it back -->
+<div class="fb" id="fb">
+  <div class="fb-bubble" id="fb-bubble" role="dialog" aria-label="Feedback">
+    <button class="icon-btn fb-close" id="fb-close" title="Dismiss"><span data-icon="x"></span></button>
+    <p>Please tell me your feature ideas 💡! It's easy to add them. Also tell me about every little bug you see 🐞, they're easy to fix. I want to make this UI very nice to use! 🌻</p>
+    <a class="btn primary small" id="feedback" href="mailto:omer@redhat.com" target="_blank" rel="noopener"><span data-icon="mail"></span>Send feedback</a>
+  </div>
+  <button class="fb-avatar" id="fb-avatar"></button>
+</div>
+
+<!-- Log drawer -->
+<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+<section class="drawer" id="drawer" aria-hidden="true">
+  <header class="drawer-head">
+    <div class="drawer-title">
+      <span id="drawer-status" class="pill"></span>
+      <div>
+        <h3 id="drawer-job-title">Log</h3>
+        <div class="muted small" id="drawer-job-sub"></div>
+      </div>
+    </div>
+    <div class="drawer-actions">
+      <button class="btn danger ghost" id="drawer-stop" hidden><span data-icon="stop"></span>Stop</button>
+      <button class="icon-btn" id="drawer-close" title="Close (Esc)"><span data-icon="x"></span></button>
+    </div>
+  </header>
+  <div class="drawer-progress" id="drawer-progress"></div>
+  <div class="log-toolbar">
+    <label class="toggle"><input type="checkbox" id="log-follow" checked><span></span>Follow</label>
+    <label class="toggle"><input type="checkbox" id="log-trace"><span></span>Show make trace</label>
+    <div class="log-search">
+      <span data-icon="search"></span>
+      <input type="search" id="log-filter" placeholder="Filter lines…" spellcheck="false">
+    </div>
+    <span class="spacer"></span>
+    <button class="btn ghost small" id="log-errors" title="Jump to next error"><span data-icon="alert"></span>Next error</button>
+    <button class="btn ghost small" id="log-copy"><span data-icon="copy"></span>Copy</button>
+  </div>
+  <div class="log" id="log" tabindex="0"></div>
+  <button class="jump-bottom" id="jump-bottom" hidden><span data-icon="down"></span>Jump to latest</button>
+</section>
+
+<!-- Modal host -->
+<div class="modal-backdrop" id="modal-backdrop" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="/static/k8s.js"></script>
+<script src="/static/browse.js"></script>
+<script src="/static/cards.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

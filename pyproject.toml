@@ -1,0 +1,19 @@
+[project]
+name = "dpf-dev-gui"
+version = "0.1.0"
+description = "Web GUI for deploying DPF dev clusters on hypervisors"
+requires-python = ">=3.10"
+dependencies = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "pyyaml>=6", "httpx>=0.27"]
+
+[project.scripts]
+dpf-dev = "dpfgui.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["dpfgui*"]
+
+[tool.setuptools.package-data]
+dpfgui = ["static/*", "remote_*.py", "env_schema.yaml"]
