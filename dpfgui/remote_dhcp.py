@@ -13,6 +13,7 @@ import time
 
 A = json.loads(sys.argv[1])
 BRIDGE, MAC = A["bridge"], A["mac"].lower()
+WANT = A.get("want")  # an address to ask for (option 50); the server gives it if it's free
 mac = bytes.fromhex(MAC.replace(":", ""))
 
 
@@ -90,7 +91,17 @@ def main():
     s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
     s.bind((BRIDGE, 0))
     xid = struct.unpack("!I", os.urandom(4))[0]
-    offer = exchange(s, xid, packet(xid, 1), (2,))    # DHCPOFFER
+    ask = bytes([50, 4]) + socket.inet_aton(WANT) if WANT else b""
+    if WANT:
+        # Ask for it outright, as a client back from a reboot asks for its old address (INIT-REBOOT):
+        # the server ACKs if it's free for this MAC. Servers don't have to honour an address asked
+        # for in a DISCOVER, and this lab's doesn't.
+        got = exchange(s, xid, packet(xid, 3, ask), (5, 6))
+        if got and got["type"] == 5:
+            out = {k: v for k, v in got.items() if k not in ("type", "server_id")}
+            return {**out, "leased": True, "wanted": WANT}
+        xid = struct.unpack("!I", os.urandom(4))[0]
+    offer = exchange(s, xid, packet(xid, 1, ask), (2,))  # DHCPOFFER
     if not offer:
         return {"ip": None, "error": "The DHCP server didn't answer"}
     req = bytes([50, 4]) + socket.inet_aton(offer["ip"])
@@ -99,6 +110,8 @@ def main():
     ack = exchange(s, xid, packet(xid, 3, req), (5, 6))  # DHCPACK / DHCPNAK
     out = {k: v for k, v in (ack or offer).items() if k not in ("type", "server_id")}
     out["leased"] = bool(ack and ack["type"] == 5)
+    if WANT:
+        out["wanted"] = WANT
     if ack and ack["type"] == 6:
         out["error"] = "The DHCP server refused the lease (DHCPNAK)"
     elif not ack:

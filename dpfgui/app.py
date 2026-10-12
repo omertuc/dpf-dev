@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, github, identity, jobs, k8s, kubeconfigs, machines, ops, schema as schema_mod, settings, ssh, subnets
+from . import config, dns, github, identity, jobs, k8s, kubeconfigs, machines, ops, schema as schema_mod, settings, ssh, subnets
 from .config import ConfigError, Profile
 
 STATIC = Path(__file__).parent / "static"
@@ -261,6 +261,7 @@ REMOTE_DHCP = (Path(__file__).parent / "remote_dhcp.py").read_text()
 class DhcpLeaseIn(BaseModel):
     bridge: str
     mac: str
+    want: str | None = None  # the address to ask for: what the DNS records already point at
 
 
 @app.post("/api/profiles/{name}/dhcp-lease")
@@ -270,13 +271,15 @@ async def dhcp_lease(request: Request, name: str, body: DhcpLeaseIn):
     p = _draft(name, request)
     if not re.fullmatch(r"[\w.\-]+", body.bridge) or not re.fullmatch(r"(?i)([0-9a-f]{2}:){5}[0-9a-f]{2}", body.mac):
         raise HTTPException(400, "Not a bridge name or MAC")
+    if body.want and not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", body.want):
+        raise HTTPException(400, "Not an IPv4 address")
 
     async def fetch():
-        args = json.dumps({"bridge": body.bridge, "mac": body.mac})
+        args = json.dumps({"bridge": body.bridge, "mac": body.mac, "want": body.want})
         r = (await ssh.run(p, REMOTE_DHCP, interp=("python3", "-"), args=(args,), timeout=30)).check("Asking DHCP")
         return json.loads(r.out)
 
-    return await _cached(("dhcp", p.host, body.bridge, body.mac.lower()), 120, fetch)
+    return await _cached(("dhcp", p.host, body.bridge, body.mac.lower(), body.want), 120, fetch)
 
 
 class DnsCheckIn(BaseModel):
@@ -285,20 +288,27 @@ class DnsCheckIn(BaseModel):
 
 @app.post("/api/profiles/{name}/dns-check")
 async def dns_check(request: Request, name: str, body: DnsCheckIn):
-    """Look the cluster's DNS names up from the hypervisor. Only on request: asking before
-    the records exist can get "doesn't exist" cached by the DNS servers for a while."""
+    """The cluster's DNS records as the domain's own nameservers have them, asked from here
+    without a resolver so no "doesn't exist" or old address gets cached (see dns.py). Lab
+    domains are internal and already exist: those are looked up from the hypervisor.
+    {records: {name: [ip]}, ttl: {name: s}, negative_ttl, via}"""
     p = _draft(name, request)
-    names = [n for n in body.names[:5] if re.fullmatch(r"[A-Za-z0-9.\-]+", n)]
-    script = "\n".join(
-        f'echo "{n} $(dig +short +time=2 +tries=1 {shlex.quote(n)} A 2>/dev/null | grep -E \'^[0-9.]+$\' | tr \'\\n\' \' \')"' for n in names)
-    r = (await ssh.run(p, "command -v dig >/dev/null || { echo NODIG; exit 0; }\n" + script, timeout=30)).check("Checking DNS")
-    if r.out.strip() == "NODIG":
-        return {"error": f"dig isn't installed on {p.host}"}
-    out = {}
-    for line in r.out.splitlines():
-        n, _, ips = line.partition(" ")
-        out[n] = ips.split()
-    return {"records": out}
+    names = [n.lower().rstrip(".") for n in body.names[:5] if re.fullmatch(r"[A-Za-z0-9.\-]+", n)]
+    lab = await asyncio.to_thread(machines.load)
+    if any(n.endswith(f".{dm['cluster']}.{dm['base']}") for dm in ops.lab_domains(lab) for n in names):
+        script = "\n".join(
+            f'echo "{n} $(dig +short +time=2 +tries=1 {shlex.quote(n)} A 2>/dev/null | grep -E \'^[0-9.]+$\' | tr \'\\n\' \' \')"' for n in names)
+        r = (await ssh.run(p, "command -v dig >/dev/null || { echo NODIG; exit 0; }\n" + script, timeout=30)).check("Checking DNS")
+        if r.out.strip() == "NODIG":
+            return {"error": f"dig isn't installed on {p.host}"}
+        return {"via": "hypervisor", "records": {n: ips.split() for n, _, ips in (l.partition(" ") for l in r.out.splitlines())}}
+    try:
+        found = await asyncio.gather(*(asyncio.to_thread(dns.lookup, n) for n in names))
+    except (dns.DnsError, OSError) as e:
+        return {"error": f"Couldn't ask the domain's nameservers: {e}"}
+    return {"via": "authoritative", "records": {f["name"]: f["addresses"] for f in found},
+            "ttl": {f["name"]: f.get("ttl") for f in found},
+            "negative_ttl": next((f["negative_ttl"] for f in found if f.get("negative_ttl")), None)}
 
 
 class BmcProbeIn(BaseModel):

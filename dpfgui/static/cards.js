@@ -394,6 +394,15 @@ const CLUSTER_CARD = {
         ${dm.users.length ? `<span class="dpu-users">${userAvatars(dm.users, me)}</span>` : '<span class="muted small">free</span>'}</button>`;
     }).join('');
 
+    // What the DNS records say now, straight from the domain's own nameservers (nothing caches
+    // it, so it's safe to ask before the records exist; lab domains: from the hypervisor).
+    const probes = fqdn ? [`api.${fqdn}`, `api-int.${fqdn}`, `console-openshift-console.apps.${fqdn}`] : [];
+    const dnsId = `dns:${fqdn}`;
+    const dnsRes = fqdn ? ctx.lazy(dnsId, () => api('POST', ctx.url('dns-check'), { names: probes })) : null;
+    const dnsGot = n => dnsRes?.data?.records?.[n] || [];
+    // Records already set up, all on one address: the address a single-node cluster should get.
+    const dnsOne = probes.length && probes.every(n => dnsGot(n).length === 1 && dnsGot(n)[0] === dnsGot(probes[0])[0]) ? dnsGot(probes[0])[0] : null;
+
     // VIPs: two free addresses in the bridge's subnet; multi-node only.
     const br = bridgeInfo(ctx);
     let vips, snoAddr = '';
@@ -404,8 +413,11 @@ const CLUSTER_CARD = {
       const vmName = `${ctx.eff('VM_PREFIX') || ''}1`, mac = ctx.facts?.vm_macs?.[vmName];
       const seen = ctx.facts?.node_addrs?.[vmName], running = seen?.how === 'running';
       const hv = ctx.facts?.hostname || 'the hypervisor', bridge = ctx.eff('BRIDGE_NAME') || 'br0';
-      const lid = `dhcp:${ctx.host}:${bridge}:${mac}`;
-      const lease = mac && !running ? ctx.lazy(lid, () => api('POST', ctx.url('dhcp-lease'), { bridge, mac })) : null;
+      // Asked for once the DNS answer is in: if the records point at one address, that's the one
+      // to ask the DHCP for (it gives it to this MAC if nothing else holds it).
+      const dnsDone = !fqdn || (dnsRes && !dnsRes.loading);
+      const lid = `dhcp:${ctx.host}:${bridge}:${mac}:${dnsOne || ''}`;
+      const lease = mac && !running && dnsDone ? ctx.lazy(lid, () => api('POST', ctx.url('dhcp-lease'), { bridge, mac, want: dnsOne })) : null;
       const leased = lease?.data?.leased ? lease.data : null;
       snoAddr = running ? seen.ip : leased?.ip || '';
       const macHow = ctx.eff('MAC_PREFIX')
@@ -414,8 +426,11 @@ const CLUSTER_CARD = {
       let addrHtml;
       if (!mac) addrHtml = `<span class="muted">Waiting for ${esc(hv)}…</span>`;
       else if (running) addrHtml = `<span class="mono">${esc(seen.ip)}</span>${okIcon()}<span class="ci-ok-text small">${esc(vmName)} is running with it</span>`;
-      else if (lease?.loading) addrHtml = `${spin}<span class="muted small">Getting an address for this MAC from the lab’s DHCP…</span>`;
-      else if (leased) addrHtml = `<span class="mono">${esc(leased.ip)}</span>${okIcon()}<span class="ci-ok-text small">leased to this MAC</span>${infoTip(
+      else if (!dnsDone) addrHtml = `${spin}<span class="muted small">Looking up your DNS records…</span>`;
+      else if (lease?.loading) addrHtml = `${spin}<span class="muted small">${dnsOne ? `Asking the lab’s DHCP for <span class="mono">${esc(dnsOne)}</span>, where your DNS points…` : 'Getting an address for this MAC from the lab’s DHCP…'}</span>`;
+      else if (leased && dnsOne && leased.ip !== dnsOne) addrHtml = `<span class="mono">${esc(leased.ip)}</span>${badIcon()}<span class="ci-bad-text small">leased to this MAC, but your DNS points at <span class="mono">${esc(dnsOne)}</span>, which the lab’s DHCP wouldn’t give it</span>${infoTip(
+        `${hv} asked the lab’s DHCP for ${dnsOne} for ${mac} and got ${leased.ip} instead: ${dnsOne} is probably still leased to another MAC (an earlier VM's lease runs until it expires), or outside the DHCP's range. Either point the records at ${leased.ip}, or try again once the old lease has run out.`)} <button class="link-btn" data-relazy="${esc(lid)}">Ask again</button>`;
+      else if (leased) addrHtml = `<span class="mono">${esc(leased.ip)}</span>${okIcon()}<span class="ci-ok-text small">leased to this MAC${dnsOne ? ', where your DNS points' : ''}</span>${infoTip(
         `${hv} asked the lab’s DHCP${leased.server ? ` (${leased.server})` : ''} for an address for ${mac}, the way the VM will, and accepted it: the DHCP holds ${leased.ip} for this MAC${leased.lease_seconds ? ` for ${Math.round(leased.lease_seconds / 60)} minutes` : ''}, and renews it each time you open these settings. When the VM boots and asks with the same MAC, it gets the same address.`)}`;
       else addrHtml = `${badIcon()}<span class="ci-bad-text small">No address from the lab’s DHCP: ${esc(lease?.data?.error || lease?.error || 'no answer')}. The VM will get whatever address the DHCP hands out when it boots.</span> <button class="link-btn" data-relazy="${esc(lid)}">Try again</button>`;
       const before = seen && !running && seen.ip !== snoAddr ? `<div class="cf-hint">Last time ${esc(vmName)} had <span class="mono">${esc(seen.ip)}</span>${seen.how === 'remembered' && seen.seen ? ` (${esc(new Date(seen.seen * 1000).toLocaleDateString())})` : ''}.</div>` : '';
@@ -446,36 +461,33 @@ const CLUSTER_CARD = {
         `;
     }
 
-    // DNS: what the records must be (information only; we never look these names up, so
-    // nothing caches a "doesn't exist" for them before you create them).
-    // Where each record has to point: the VIPs, or for single-node the node address.
+    // DNS: where each record has to point (the VIPs, or for single-node the node's address),
+    // next to where it points now.
     const vip = (key, label) => { const v = sno ? snoAddr : ctx.eff(key); return v ? `<span class="mono">${esc(v)}</span>` : `<span class="muted">${sno ? 'the node’s address' : label}</span>`; };
     const recs = fqdn ? [
-      [`api.${fqdn}`, vip('API_VIP', 'the API VIP'), 'kubectl, and the DPU hosts and DPUs (OVN reaches the cluster by this name)', `api.${fqdn}`, 'API_VIP'],
-      [`api-int.${fqdn}`, vip('API_VIP', 'the API VIP'), 'nodes joining the cluster fetch their ignition here', `api-int.${fqdn}`, 'API_VIP'],
-      [`*.apps.${fqdn}`, vip('INGRESS_VIP', 'the apps VIP'), 'the console and OAuth login', `console-openshift-console.apps.${fqdn}`, 'INGRESS_VIP'],
+      [`api.${fqdn}`, vip('API_VIP', 'the API VIP'), 'kubectl, and the DPU hosts and DPUs (OVN reaches the cluster by this name)', probes[0], 'API_VIP'],
+      [`api-int.${fqdn}`, vip('API_VIP', 'the API VIP'), 'nodes joining the cluster fetch their ignition here', probes[1], 'API_VIP'],
+      [`*.apps.${fqdn}`, vip('INGRESS_VIP', 'the apps VIP'), 'the console and OAuth login', probes[2], 'INGRESS_VIP'],
     ] : [];
-    // Looked up only when you ask (a lookup before the records exist gets "doesn't exist" cached).
-    const chk = ctx.ui.dnsCheck?.fqdn === fqdn ? ctx.ui.dnsCheck : null;
     const status = (probe, key) => {
-      if (!chk?.data) return '';
-      if (chk.data.error) return '';
-      const got = chk.data.records?.[probe] || [];
-      // What the record should point at: the VIP, or for single-node the node's address.
+      if (!dnsRes || dnsRes.loading) return spin;
+      if (!dnsRes.data || dnsRes.data.error) return '';
+      const got = dnsGot(probe);
       const want = sno ? snoAddr : ctx.eff(key);
+      const ttl = dnsRes.data.ttl?.[probe];
       if (!got.length) return `${badIcon()}<span class="ci-bad-text">no record</span>`;
-      if (!want) return `<span class="muted">${esc(got.join(', '))}</span>`;
-      if (!got.includes(want)) return `${badIcon()}<span class="ci-bad-text">points at ${esc(got.join(', '))}</span>`;
+      if (!want) return `<span class="mono">${esc(got.join(', '))}</span>`;
+      if (!got.includes(want)) return `${badIcon()}<span class="ci-bad-text">points at ${esc(got.join(', '))}</span>${ttl ? infoTip(`Once you change it, DNS servers that looked it up already keep the old address for up to ${fmtDur(ttl)} (its TTL).`) : ''}`;
       return `${okIcon()}<span class="ci-ok-text">${esc(got.join(', '))}</span>`;
     };
+    const lookupErr = dnsRes?.error || dnsRes?.data?.error;
+    const where = dnsRes?.data?.via === 'hypervisor' ? `from ${esc(ctx.facts?.hostname || 'the hypervisor')}` : `straight from ${esc(dom)}’s own nameservers, so no DNS server caches the answer`;
     const zone = recs.map(([n, , ]) => n).map((n, i) => `${n}.`.padEnd(fqdn.length + 16) + ` IN A ${(sno ? snoAddr : i < 2 ? ctx.eff('API_VIP') : ctx.eff('INGRESS_VIP')) || '<IP>'}`).join('\n');
-    const dns = fqdn ? `<div class="ci-sub">DNS records you need${infoTip(`The DPU hosts and DPUs reach the cluster by name, so these have to be in DNS; the automation only adds api.${fqdn} to the hypervisor’s own /etc/hosts.`)}</div>
+    const dns = fqdn ? `<div class="ci-sub">DNS records you need${infoTip(`The DPU hosts and DPUs reach the cluster by name, so these have to be in DNS; the automation only adds api.${fqdn} to the hypervisor’s own /etc/hosts. What they say now is looked up ${where}.`)}
+        <button class="icon-btn" data-relazy="${esc(dnsId)}" title="Look again" ${dnsRes?.loading ? 'disabled' : ''}>${icon('refresh', 'sm')}</button></div>
       <table class="dns-chart"><tbody>${recs.map(([n, t, why, probe, key]) => `<tr><td class="mono">${esc(n)}</td><td class="dns-arrow">→</td><td>${t}</td>
-        <td class="dns-why">${infoTip(why)}</td>${chk?.data ? `<td class="dns-status">${status(probe, key)}</td>` : ''}</tr>`).join('')}</tbody></table>
-      <div class="ci-line"><button class="btn small" data-dns-check ${chk?.loading ? 'disabled' : ''}
-          title="Looks the names up from the hypervisor. Do it once you’ve created the records: asking before that can make DNS servers remember “doesn’t exist” for a while.">
-          ${chk?.loading ? spin : icon('search', 'sm')}${chk?.data ? 'Check again' : 'Check DNS now'}</button>
-        ${chk?.data?.error || chk?.error ? `<span class="ci-bad-text small">${esc(chk.data?.error || chk.error)}</span>` : infoTip('Do this once the records exist: looking them up earlier can get “doesn’t exist” cached by the DNS servers for a while.')}</div>
+        <td class="dns-why">${infoTip(why)}</td><td class="dns-status">${status(probe, key)}</td></tr>`).join('')}</tbody></table>
+      ${lookupErr ? `<div class="ci-line"><span class="ci-bad-text small">${esc(lookupErr)}</span></div>` : ''}
       <div class="ci-line"><button class="link-btn" data-copy="${esc(zone)}">${icon('copy', 'sm')}Copy as zone records</button></div>` : '';
     const etcHosts = (ctx.eff('SKIP_ETC_HOSTS') || 'false') !== 'true';
     return `${name}
@@ -487,15 +499,6 @@ const CLUSTER_CARD = {
   async click(e, ctx) {
     const rl = e.target.closest('[data-relazy]');
     if (rl) return ctx.relazy(rl.dataset.relazy);
-    if (e.target.closest('[data-dns-check]')) {
-      const fqdn = `${ctx.eff('CLUSTER_NAME')}.${ctx.eff('BASE_DOMAIN')}`;
-      ctx.ui.dnsCheck = { fqdn, loading: true };
-      ctx.rerender();
-      const names = [`api.${fqdn}`, `api-int.${fqdn}`, `console-openshift-console.apps.${fqdn}`];
-      try { ctx.ui.dnsCheck = { fqdn, data: await api('POST', ctx.url('dns-check'), { names }) }; }
-      catch (err) { ctx.ui.dnsCheck = { fqdn, error: err.message }; }
-      return ctx.rerender();
-    }
     if (e.target.closest('[data-free-ips]')) {
       const br = bridgeInfo(ctx);
       ctx.ui.freeIps = { loading: true };
