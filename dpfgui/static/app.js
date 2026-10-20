@@ -2452,11 +2452,9 @@ function slotGridHtml(d, cur) {
       <div class="sn-subnet"><div class="sn-head"><span>Subnet ${sub.id}</span><code>${esc(sub.cidr)}</code></div>
       ${sub.slots.map(slot => {
         const selected = cur === slot.cidr;
-        // Only your own slots can be picked; free ones are requested with a PR to the slots repo.
-        const pickable = isMe(slot.owner);
-        const cls = `sn-slot ${slot.kind || 'free'} ${isMe(slot.owner) ? 'me' : ''} ${selected ? 'here' : ''} ${pickable ? 'pickable' : 'taken'}`;
-        const attrs = pickable ? `data-pick="${esc(slot.cidr)}" title="Use ${esc(slot.cidr)}"`
-          : `title="${slot.owner ? `Allocated to ${slot.kind === 'ci' ? 'CI ' : '@'}${esc(slot.owner)}` : 'Free: request it with a pull request to the slots repo'}"`;
+        const mine = isMe(slot.owner);
+        const cls = `sn-slot ${slot.kind || 'free'} ${mine ? 'me' : ''} ${selected ? 'here' : ''} pickable`;
+        const attrs = `data-pick="${esc(slot.cidr)}" data-pick-owner="${esc(slot.owner || '')}" title="Use ${esc(slot.cidr)}"`;
         const check = selected ? `<span class="sn-check">${icon('check', 'sm')}</span>` : '';
         if (slot.kind === 'user') {
           const u = d.users[slot.owner] || {};
@@ -2467,13 +2465,8 @@ function slotGridHtml(d, cur) {
               <div class="sn-sub">@${esc(slot.owner)} · <span class="mono">${esc(slot.cidr)}</span></div></div>${check}
             ${ghLink(slot.owner)}</div>`;
         }
-        if (slot.kind === 'ci') {
-          return `<div class="${cls}" ${attrs}><span class="sn-ci-icon">${icon('server')}</span>
-            <div class="sn-who"><div class="sn-name">${esc(slot.owner)} <span class="sn-badge">CI</span></div>
-              <div class="sn-sub">${esc(slot.description || '')} · <span class="mono">${esc(slot.cidr)}</span></div></div>${check}</div>`;
-        }
         return `<div class="${cls}" ${attrs}><span class="sn-free-icon">${icon('plus')}</span>
-          <div class="sn-who"><div class="sn-name">Free</div><div class="sn-sub mono">${esc(slot.cidr)}</div></div>${check}</div>`;
+          <div class="sn-who"><div class="sn-name">Free</div><div class="sn-sub">${slot.description ? `${esc(slot.description)} · ` : ''}<span class="mono">${esc(slot.cidr)}</span></div></div>${check}</div>`;
       }).join('')}</div>`).join('')}</div>`;
 }
 
@@ -2957,7 +2950,6 @@ async function openEditor(tab = 'overview', opts = {}) {
   /* ── Editing the draft ── */
   let editing = null;      // {key, layer} of the value being edited inline
   let pickerOpen = false;  // HBN slot picker under VTEP_CIDR
-  let snEditing = false;
   let editingNote = null;  // {key, layer}
   let addState = null; // {step: 'pick', q, idx} | {step: 'value', key, layer, value}
   const revealed = new Set();
@@ -3024,7 +3016,7 @@ async function openEditor(tab = 'overview', opts = {}) {
   let ovTab = opts.card || null;
 
   function overview() {
-    if (!S.subnets) loadSubnets();
+    loadSubnets();
     if (!S.machines) loadMachines().then(() => renderOvList());
     $('#ed-main').innerHTML = `
       <div class="ov-toolbar">
@@ -3586,15 +3578,11 @@ async function openEditor(tab = 'overview', opts = {}) {
     if (!d) { loadSubnets().then(() => renderOvList()); return `<div class="sn-wrap">${toggle}<div class="muted small"><span class="spinner" style="width:12px;height:12px"></span> Loading allocations…</div></div>`; }
     const me = d.me || [];
     const cur = r.effective;
-    const srcLabel = (d.source || '').startsWith('github:') ? d.source.slice(7) : (d.source || '').replace(/^\/home\/[^/]+/, '~');
-    const footer = snEditing || d.error ? `
-      ${d.error ? `<div class="ov-issue error">${icon('alert', 'sm')}<span>Couldn't load the allocations: ${esc(d.error)}</span></div>` : ''}
-      <div class="sn-form"><input class="input mono" id="sn-src" value="${esc(d.source || '')}" spellcheck="false"
-          placeholder="github:rh-ecosystem-edge/dpf-allocations/hbn-subnets.yaml">
-        <button class="btn small primary" data-sn-save>Use</button>${d.error ? '' : '<button class="btn small ghost" data-sn-cancel>Cancel</button>'}</div>
-      <div class="muted small"><code>github:owner/repo</code> (optionally <code>/path/file.yaml</code>), or a local file. Empty for the default.</div>`
+        const srcLink = d.source_url ? `<a href="${esc(d.source_url)}" target="_blank" rel="noopener">${esc(d.source_label || 'source')}</a>` : '';
+    const footer = d.error ? `<div class="ov-issue error">${icon('alert', 'sm')}<span>Couldn't load the allocations: ${esc(d.error)}</span></div>
+      <div class="ci-line" style="gap:6px;align-items:center"><span class="muted small">API base URL:</span><input class="input mono" data-sn-base value="${esc(d.base_url || '')}" placeholder="https://nvidia-lab.okoyl.xyz" style="flex:1"><button class="btn small" data-sn-base-save>Save</button>${d.base_url && d.base_url !== 'https://nvidia-lab.okoyl.xyz' ? '<button class="link-btn" data-sn-base-reset>Reset</button>' : ''}</div>`
       : `<div class="sn-foot muted small">
-          <span>From <span class="mono">${esc(srcLabel)}</span> <button class="link-btn" data-sn-edit>change</button> · <button class="link-btn" data-sn-reload>reload</button></span>
+          <span>${srcLink} · <button class="link-btn" data-sn-reload>reload</button></span>
           <span class="you-pick">You: ${me.length ? me.map(m => `<span class="you-chip">@${esc(m)}</span>`).join('') : '<span class="muted">unknown (pick from the sidebar)</span>'}</span>
         </div>`;
     const grid = d.error ? '' : slotGridHtml(d, cur);
@@ -3606,21 +3594,21 @@ async function openEditor(tab = 'overview', opts = {}) {
     if (e.target.closest('[data-picker]')) { pickerOpen = !pickerOpen; renderOvList(); return true; }
     const pick = e.target.closest('[data-pick]');
     if (pick) {
+      const owner = pick.dataset.pickOwner;
+      if (owner && !(d.me || []).includes(owner) && !window.confirm(`${pick.dataset.pick} is allocated to @${owner}. Use it anyway?`)) return true;
       setValue('set', r.key, pick.dataset.pick);
       return true;
     }
-    if (e.target.closest('[data-sn-edit]')) { snEditing = true; renderOvList(); return true; }
-    if (e.target.closest('[data-sn-cancel]')) { snEditing = false; renderOvList(); return true; }
-    if (e.target.closest('[data-sn-reload]')) { S.subnets = null; await loadSubnets(true); analysisFor = ''; runAnalysis(); renderOvList(); return true; }
-    if (e.target.closest('[data-sn-save]')) {
-      try {
-        S.subnets = await api('PUT', '/api/subnets/prefs', { source: $('#sn-src').value });
-        snEditing = !!S.subnets.error;
-        analysisFor = ''; runAnalysis();
-      } catch (err) { toast(err.message, 'bad'); }
-      renderOvList();
+    if (e.target.closest('[data-sn-base-reset]')) {
+      try { await api('PUT', '/api/subnets/base-url', { url: null }); S.subnets = null; await loadSubnets(true); analysisFor = ''; runAnalysis(); renderOvList(); toast('Reset to default', 'ok'); } catch (err) { toast(err.message, 'bad'); }
       return true;
     }
+    if (e.target.closest('[data-sn-base-save]')) {
+      const inp = e.target.closest('.ci-line')?.querySelector('[data-sn-base]');
+      if (inp) { try { await api('PUT', '/api/subnets/base-url', { url: inp.value }); S.subnets = null; await loadSubnets(true); analysisFor = ''; runAnalysis(); renderOvList(); toast('Saved', 'ok'); } catch (err) { toast(err.message, 'bad'); } }
+      return true;
+    }
+    if (e.target.closest('[data-sn-reload]')) { S.subnets = null; await loadSubnets(true); analysisFor = ''; runAnalysis(); renderOvList(); return true; }
     return e.target.closest('.sn-panel') !== null;
   }
 
@@ -4110,12 +4098,12 @@ function applyIdentity(me) {
 async function loadIdentity() {
   const d = await api('GET', '/api/identity');
   applyIdentity(d.me ? [d.me] : []);
-  if (!d.chosen && !modal.isOpen) openIdentity(d);
+  if (!d.chosen) openIdentity();
 }
 
 async function openIdentity(d) {
   if (!d) {
-    try { d = await api('GET', '/api/identity'); } catch (e) { return toast(e.message, 'bad'); }
+    try { d = await api('GET', '/api/identity?full=1'); } catch (e) { return toast(e.message, 'bad'); }
   }
   const people = d.me && !d.known.some(p => p.login === d.me) ? [...d.known, { login: d.me }] : d.known;
   modal.show(`
@@ -4127,7 +4115,7 @@ async function openIdentity(d) {
       <div class="id-grid">${people.map(p => `
         <button class="id-tile ${p.login === d.me ? 'on' : ''}" data-login="${esc(p.login)}" title="@${esc(p.login)}">
           ${avatarHtml(`https://avatars.githubusercontent.com/${encodeURIComponent(p.login)}?s=192`, 96)}
-          <span>${esc(p.name || p.login)}</span>
+          <span class="id-name">${esc(p.name || p.login)}</span>
         </button>`).join('')}</div>
     </div>
     <div class="modal-foot">
@@ -4145,6 +4133,17 @@ async function openIdentity(d) {
       if (S.cur) loadAnalysis(S.cur);
     } catch (err) { toast(err.message, 'bad'); }
   }, { signal: modal.signal });
+  var needNames = people.filter(function(p) { return !p.name; }).map(function(p) { return p.login; });
+  if (needNames.length) {
+    api('POST', '/api/identity/profiles', { logins: needNames }).then(function(profiles) {
+      var btns = document.querySelectorAll('#modal .id-tile[data-login]');
+      for (var i = 0; i < btns.length; i++) {
+        var login = btns[i].dataset.login;
+        var info = profiles[login];
+        if (info && info.name) btns[i].querySelector('.id-name').textContent = info.name;
+      }
+    }).catch(function() {});
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════════

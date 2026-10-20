@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -138,6 +139,12 @@ def _fetch_user(login: str) -> dict | None:
     return {"name": d.get("name"), "avatar": d.get("avatar_url"), "at": time.time()}
 
 
+def cached_users(logins: list[str]) -> dict[str, dict]:
+    """{login: {name, avatar}} from the on-disk cache only, no API calls."""
+    cache = _read_cache()
+    return {l: {"name": cache.get(l, {}).get("name"), "avatar": cache.get(l, {}).get("avatar")} for l in logins}
+
+
 def users(logins: list[str]) -> dict[str, dict]:
     """{login: {name, avatar}} for each login; name and avatar are None when unknown."""
     cache = _read_cache()
@@ -149,3 +156,55 @@ def users(logins: list[str]) -> dict[str, dict]:
             cache.update(fetched)
             _cache_path().write_text(json.dumps(cache, indent=2) + "\n")
     return {l: {"name": cache.get(l, {}).get("name"), "avatar": cache.get(l, {}).get("avatar")} for l in logins}
+
+
+# ── Email → GitHub login resolution ──────────────────────────────────────────
+# The lab API identifies users by email; everything else uses GitHub logins.
+# Mapping: search GitHub for any commit by that email and read the author's login.
+# One API call per email, cached permanently.
+
+_email_failed: dict[str, float] = {}
+
+
+def _email_cache_path() -> Path:
+    return config.state_dir() / "email-logins.json"
+
+
+def _read_email_cache() -> dict:
+    try:
+        return json.loads(_email_cache_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _resolve_one(email: str) -> str | None:
+    if time.time() - _email_failed.get(email, 0) < 60:
+        return None
+    try:
+        result = _get(f"search/commits?q=author-email:{urllib.parse.quote(email)}&per_page=1", timeout=10)
+    except GitHubError:
+        _email_failed[email] = time.time()
+        return None
+    for item in (result.get("items") or []):
+        author = item.get("author")
+        if author and author.get("login"):
+            return author["login"]
+    _email_failed[email] = time.time()
+    return None
+
+
+def resolve_emails(emails: list[str]) -> dict[str, str]:
+    """Map emails to GitHub logins via commit authorship. Cached permanently; misses retried daily."""
+    cache = _read_email_cache()
+    need = [e for e in dict.fromkeys(emails) if e not in cache]
+    if need:
+        with ThreadPoolExecutor(4) as ex:
+            found = dict(zip(need, ex.map(_resolve_one, need)))
+        updated = False
+        for email, login in found.items():
+            if login:
+                cache[email] = {"login": login, "at": time.time()}
+                updated = True
+        if updated:
+            _email_cache_path().write_text(json.dumps(cache, indent=2) + "\n")
+    return {e: cache[e]["login"] for e in emails if e in cache and cache[e].get("login")}

@@ -52,10 +52,19 @@ def known() -> list[str]:
     return sorted(logins, key=str.lower)
 
 
+def quick() -> dict:
+    """Just chosen + me, no slow loads."""
+    return {"chosen": chosen(), "me": (me() or [None])[0]}
+
+
 def view() -> dict:
     logins = known()
-    names = github.users(logins)
+    cached = github.cached_users(logins)
     return {"chosen": chosen(), "me": (me() or [None])[0],
-            "known": [{"login": l, "name": names[l]["name"]} for l in logins],
-            # Not on the list: ask for an HBN slot (a pull request to the allocations file)
+            "known": [{"login": l, "name": cached[l]["name"]} for l in logins],
             "request_url": subnets.load().get("request_url")}
+
+
+def profiles(logins: list[str]) -> dict[str, dict]:
+    """Fetch fresh GitHub profiles for the given logins (slow, hits the API)."""
+    return github.users(logins)

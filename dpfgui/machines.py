@@ -1,24 +1,23 @@
-"""Lab machine allocations (the dpf-allocations repo's lab-machines.yaml).
+"""Lab machine allocations from the nvidia-lab API.
 
-Tracks hypervisors, DPU workers and shared DNS domains so the team
-can see who's using what without digging through a spreadsheet.
-
-The source is `github:owner/repo[/path]` (the team's repo by default), read from a clone
-the app keeps and pulls, or a local file such as a checkout you're editing.
+Tracks hypervisors and DPU workers so the team can see who's using
+what without digging through a spreadsheet.
 """
 
 from __future__ import annotations
 
 import json
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
-
-import yaml
 
 from . import config, github
 
-DEFAULT_SOURCE = f"github:{github.ALLOCATIONS}/lab-machines.yaml"
-_cache: dict = {"at": 0, "key": None, "data": None}
+API_URL = "https://nvidia-lab.okoyl.xyz/api/public/machines"
+SOURCE_URL = "https://nvidia-lab.okoyl.xyz/machines?q=Bluefield&view=ownership"
+SOURCE_LABEL = "nvidia-lab"
+_cache: dict = {"at": 0, "data": None}
 
 
 class MachinesError(RuntimeError):
@@ -29,36 +28,12 @@ def _prefs_path() -> Path:
     return config.CONFIG_DIR / "app.json"
 
 
-def prefs() -> dict:
-    try:
-        data = json.loads(_prefs_path().read_text())
-    except (OSError, ValueError):
-        data = {}
-    m = data.get("machines") or {}
-    return {"source": m.get("source") or DEFAULT_SOURCE}
-
-
 def _write(data: dict) -> None:
     config.CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     _prefs_path().write_text(json.dumps(data, indent=2) + "\n")
     _prefs_path().chmod(0o600)
 
 
-def save_prefs(source: str | None = None) -> dict:
-    try:
-        data = json.loads(_prefs_path().read_text())
-    except (OSError, ValueError):
-        data = {}
-    m = data.setdefault("machines", {})
-    if source is not None:
-        m["source"] = source.strip() or None
-    _write(data)
-    _cache["at"] = 0
-    return prefs()
-
-
-# Per-machine worker settings the YAML doesn't carry (boot MAC, BMC credentials, ...),
-# remembered when you switch a worker away from a machine so switching back restores them.
 REMEMBERED_FIELDS = ("BMC_USER", "BMC_PASSWORD", "BOOT_MAC", "ROOT_DEVICE", "DPU")
 
 
@@ -86,86 +61,83 @@ def remember(machine: str, values: dict[str, str], source: str = "") -> None:
     _write(data)
 
 
-def _parse(source: str, fresh: bool = False) -> dict:
+# ── Machines from the API ────────────────────────────────────────────────────
+
+
+def _fetch_api() -> list[dict]:
+    req = urllib.request.Request(API_URL, headers={"Accept": "application/json", "User-Agent": "dpf-dev-gui"})
     try:
-        raw = yaml.safe_load(github.read_source(source, "lab-machines.yaml", fresh)) or {}
-    except github.GitHubError as e:
-        raise MachinesError(str(e))
-    except yaml.YAMLError as e:
-        raise MachinesError(f"Invalid YAML: {e}")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        raise MachinesError(f"{API_URL}: {e.code} {e.reason}")
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+        raise MachinesError(f"Can't reach {API_URL}: {getattr(e, 'reason', e)}")
+
+
+def _parse_api(raw: list[dict]) -> list[dict]:
+    """API machines → sections (Hypervisors, DPU workers)."""
+    all_emails = [u for m in raw for u in (m.get("users") or []) if "@" in u]
+    email_map = github.resolve_emails(all_emails) if all_emails else {}
 
     sections: list[dict] = []
 
-    # Hypervisors
-    hvs = raw.get("hypervisors") or {}
-    if hvs:
-        machines = []
-        for name, m in hvs.items():
-            machines.append(_machine(name, m, "Hypervisor"))
-        sections.append({"name": "Hypervisors", "machines": machines})
+    hypervisors = [_machine(m, "Hypervisor", email_map) for m in raw if m.get("type") == "Hypervisor" and not m.get("archived")]
+    if hypervisors:
+        sections.append({"name": "Hypervisors", "machines": hypervisors})
 
-    # DPU workers
-    dpus = raw.get("dpus") or {}
-    if dpus:
-        machines = []
-        for name, m in dpus.items():
-            machines.append(_machine(name, m, "DPU Worker"))
-        sections.append({"name": "DPU workers", "machines": machines})
+    workers = [_machine(m, "DPU Worker", email_map) for m in raw
+               if m.get("type") == "Worker" and not m.get("archived")
+               and (m.get("hardware_summary") or {}).get("dpu_models")]
+    if workers:
+        sections.append({"name": "DPU workers", "machines": workers})
 
-    # Domains
-    doms = raw.get("domains") or {}
-    if doms:
-        machines = []
-        for name, m in doms.items():
-            machines.append({
-                "id": str(name),
-                "type": "Domain",
-                "address": m.get("api", ""),
-                "short": str(name),
-                "api": m.get("api"),
-                "api_ip": m.get("api_ip"),
-                "apps": m.get("apps"),
-                "apps_ip": m.get("apps_ip"),
-                "users": m.get("users") or [],
-                "purpose": m.get("purpose"),
-                "broken": False,
-            })
-        sections.append({"name": "Domains", "machines": machines})
-
-    return {"sections": sections}
+    return sections
 
 
-def _machine(name: str, m: dict, typ: str) -> dict:
+def _machine(m: dict, typ: str, email_map: dict[str, str]) -> dict:
+    fqdn = m.get("fqdn") or ""
+    short = fqdn.split(".")[0] if fqdn else str(m.get("id", ""))
+    hw = m.get("hardware_summary") or {}
+    features = []
+    for name in (hw.get("dpu_models") or {}):
+        features.append(f"DPU: {name}")
+    for name in (hw.get("gpu_models") or {}):
+        features.append(f"GPU: {name}")
+    users = [email_map.get(u, u) for u in (m.get("users") or [])]
+    clusters = m.get("clusters") or []
+    cluster = clusters[0].get("cluster_name") if clusters else None
     return {
-        "id": str(name),
+        "id": short,
         "type": typ,
-        "address": m.get("address", ""),
-        "short": str(name),
-        "bmc": m.get("bmc"),
-        "dpu_bmc": m.get("dpu_bmc"),
-        "users": m.get("users") or [],
-        "cluster": m.get("cluster"),
-        "hbn_cidr": m.get("hbn_cidr"),
-        "purpose": m.get("purpose"),
-        "features": m.get("features") or [],
-        "ports": m.get("ports"),
-        "notes": m.get("notes"),
-        # Optional per-machine worker settings; filled in when you switch a worker to it.
-        "worker": {k.upper(): str(m[k]) for k in ("boot_mac", "root_device", "bmc_user") if m.get(k)},
-        "broken": bool(m.get("broken")),
+        "address": fqdn,
+        "short": short,
+        "bmc": m.get("bmc_ip"),
+        "dpu_bmc": None,
+        "users": users,
+        "cluster": cluster,
+        "hbn_cidr": None,
+        "purpose": hw.get("model"),
+        "features": features,
+        "ports": None,
+        "notes": None,
+        "worker": {},
+        "broken": bool(m.get("archived")),
     }
 
 
+# ── Loading ──────────────────────────────────────────────────────────────────
+
+
 def load(max_age: float = 120) -> dict:
-    pr = prefs()
-    key = pr["source"]
-    if not (_cache["key"] == key and time.time() - _cache["at"] < max_age and _cache["data"]):
+    if not (time.time() - _cache["at"] < max_age and _cache["data"]):
         try:
-            data = {**_parse(key, fresh=max_age == 0), "error": None}
+            data = {**{"sections": _parse_api(_fetch_api())}, "error": None}
         except MachinesError as e:
             data = {"sections": [], "error": str(e)}
-        data["source"] = key
-        _cache.update(at=time.time(), key=key, data=data)
+        data["source"] = SOURCE_URL
+        data["source_label"] = SOURCE_LABEL
+        _cache.update(at=time.time(), data=data)
     return _cache["data"]
 
 

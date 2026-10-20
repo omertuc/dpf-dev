@@ -359,19 +359,13 @@ async def bfb_files(url: str):
 # ── HBN subnet allocations ───────────────────────────────────────────────────
 
 
-class SubnetPrefsIn(BaseModel):
-    source: str | None = None
-
-
 def _subnets_view() -> dict:
     data = subnets.load()
     owners = sorted({s["owner"] for sub in data["subnets"] for s in sub["slots"] if s["kind"] == "user"})
     users = {}
     for o, gh in github.users(owners).items():
-        # avatars.githubusercontent.com serves the image directly (github.com/<user>.png redirects through cookies)
         avatar = (gh["avatar"] + ("&" if "?" in gh["avatar"] else "?") + "s=96") if gh["avatar"] else f"https://avatars.githubusercontent.com/{o}?s=96"
         users[o] = {"name": gh["name"], "avatar": avatar, "url": f"https://github.com/{o}"}
-    # Which of your profiles use which slot.
     used_by: dict[str, list[str]] = {}
     for p in config.list_profiles():
         v = config.active_values(config.profile_settings(p.name)).get("VTEP_CIDR")
@@ -381,15 +375,17 @@ def _subnets_view() -> dict:
 
 
 @app.get("/api/subnets")
-async def get_subnets(refresh: bool = False):
-    if refresh:
-        await asyncio.to_thread(subnets.load, 0)
+async def get_subnets():
     return await asyncio.to_thread(_subnets_view)
 
 
-@app.put("/api/subnets/prefs")
-async def put_subnet_prefs(body: SubnetPrefsIn):
-    subnets.save_prefs(body.source)
+class BaseUrlIn(BaseModel):
+    url: str | None = None
+
+
+@app.put("/api/subnets/base-url")
+async def put_subnets_base_url(body: BaseUrlIn):
+    await asyncio.to_thread(subnets.save_base_url, body.url)
     return await asyncio.to_thread(_subnets_view)
 
 
@@ -401,8 +397,14 @@ class IdentityIn(BaseModel):
 
 
 @app.get("/api/identity")
-async def get_identity():
-    return await asyncio.to_thread(identity.view)
+async def get_identity(full: bool = False):
+    return await asyncio.to_thread(identity.view if full else identity.quick)
+
+
+@app.post("/api/identity/profiles")
+async def identity_profiles(body: dict):
+    logins = body.get("logins") or []
+    return await asyncio.to_thread(identity.profiles, logins)
 
 
 @app.put("/api/identity")
@@ -414,26 +416,15 @@ async def put_identity(body: IdentityIn):
 # ── Lab machines ─────────────────────────────────────────────────────────────
 
 
-class MachinePrefsIn(BaseModel):
-    source: str | None = None
-
-
 def _machines_view(max_age: float = 120) -> dict:
     lab = machines.load(max_age)
     return {**lab, "me": identity.me(), "remembered": machines.remembered(),
-            # The lab domains, with the settings that use each
             "domains": [{**dm, "values": ops.domain_values(dm)} for dm in ops.lab_domains(lab)]}
 
 
 @app.get("/api/machines")
 async def get_machines(refresh: bool = False):
     return await asyncio.to_thread(_machines_view, 0 if refresh else 120)
-
-
-@app.put("/api/machines/prefs")
-async def put_machine_prefs(body: MachinePrefsIn):
-    machines.save_prefs(body.source)
-    return await asyncio.to_thread(_machines_view)
 
 
 class DpuIn(BaseModel):
@@ -818,6 +809,12 @@ async def k8s_live(ws: WebSocket, name: str):
     finally:
         for t in tasks.values():
             t.cancel()
+
+
+@app.on_event("startup")
+async def _warm_caches() -> None:
+    asyncio.get_event_loop().run_in_executor(None, machines.load)
+    asyncio.get_event_loop().run_in_executor(None, subnets.load)
 
 
 @app.on_event("shutdown")

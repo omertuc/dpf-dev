@@ -566,7 +566,7 @@ async def cmd_dpu_remove(a) -> None:
 def cmd_slot(a) -> None:
     p = profile(a)
     me = need_identity()
-    data = subnets.load(0 if a.refresh else 30)
+    data = subnets.load()
     if data.get("error"):
         raise Fail(f"Couldn't load the HBN allocations: {data['error']}")
     options = ops.slot_options(data, me)

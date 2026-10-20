@@ -315,7 +315,9 @@ const DPUS_CARD = {
     const me = d.me || [];
     const byId = Object.fromEntries(sel.filter(w => w.m).map(w => [w.m.id, w]));
     const full = sel.length >= slots;
+    const allDpus = dpusOf(d).slice();
     const rank = m => byId[m.id] ? 0 : m.broken ? 4 : m.users.some(u => me.includes(u)) ? 1 : !m.users.length ? 2 : 3;
+    allDpus.sort((a, b) => rank(a) - rank(b));
     const row = m => {
       const w = byId[m.id], mine = m.users.some(u => me.includes(u));
       const disabled = !w && (m.broken || !m.bmc || full);
@@ -338,11 +340,17 @@ const DPUS_CARD = {
         <input type="checkbox" data-dh-n="${w.n}" checked><span class="dh-name">${esc(w.name || `worker ${w.n}`)}</span>
         <span class="small muted">not in the lab list · edit it with ⋯</span></label>
         <div class="dh-detail">${workerDetails(ctx, w.n, null)}</div></div>`).join('');
-    const srcLabel = (d.source || '').replace(/^\/home\/[^/]+/, '~');
-    const none = sel.length ? '' : `<div class="cf-hint">${icon('info', 'sm')} None picked: the cluster installs without DPU hosts. Tick one to add it.</div>`;
-    const csr = ctx.row('AUTO_APPROVE_WORKER_CSR')?.known ? `<div class="ci-line">${checkbox('AUTO_APPROVE_WORKER_CSR', ctx.eff('AUTO_APPROVE_WORKER_CSR') === 'true', 'Approve their certificate requests automatically')}${infoTip('When the DPU hosts join, each asks the cluster for certificates that someone has to approve (oc adm certificate approve). With this on, a CronJob approves every pending request once a minute: all of them, not only the DPU hosts’. (AUTO_APPROVE_WORKER_CSR)')}${resetBtn(ctx, 'AUTO_APPROVE_WORKER_CSR')}</div>` : '';
-    return `${none}${hostSubnetLine(ctx)}${csr}<div class="dh-list">${custom}${dpusOf(d).slice().sort((a, b) => rank(a) - rank(b)).map(row).join('')}</div>
-      <div class="sn-foot muted small"><span>From <span class="mono">${esc(srcLabel)}</span> · <button class="link-btn" data-dpu-reload>reload</button></span>
+    const srcLink = d.source ? `<a href="${esc(d.source)}" target="_blank" rel="noopener">${esc(d.source_label || "source")}</a>` : '';
+    const showAll = ctx.ui.dpuShowAll;
+    const myDpus = allDpus.filter(m => byId[m.id] || m.users.some(u => me.includes(u)));
+    const visible = showAll ? allDpus : myDpus;
+    const emptyMine = !showAll && !myDpus.length && !custom;
+    const csr = sel.length && ctx.row('AUTO_APPROVE_WORKER_CSR')?.known ? `<div class="ci-line">${checkbox('AUTO_APPROVE_WORKER_CSR', ctx.eff('AUTO_APPROVE_WORKER_CSR') === 'true', 'Approve their certificate requests automatically')}${infoTip('When the DPU hosts join, each asks the cluster for certificates that someone has to approve (oc adm certificate approve). With this on, a CronJob approves every pending request once a minute: all of them, not only the DPU hosts’. (AUTO_APPROVE_WORKER_CSR)')}${resetBtn(ctx, 'AUTO_APPROVE_WORKER_CSR')}</div>` : '';
+    if (emptyMine) return `<div class="cf-hint">${icon('info', 'sm')} No machines assigned to you. Claim one on ${srcLink}.</div>
+      <div class="ci-line"><button class="btn small" data-dpu-showall>${icon('layers', 'sm')}See all ${allDpus.length} machines</button></div>`;
+    return `${hostSubnetLine(ctx)}${csr}
+      <div class="dh-list">${custom}${visible.map(row).join('')}</div>
+      <div class="sn-foot muted small"><span>${showAll ? srcLink + ' · ' : ''}<button class="link-btn" data-dpu-showall>${showAll ? 'Show yours' : `See all ${allDpus.length}`}</button> · <button class="link-btn" data-dpu-reload>reload</button></span>
         <span>${sel.length} of ${slots} slots used</span></div>`;
   },
   change(e, ctx) {
@@ -356,6 +364,7 @@ const DPUS_CARD = {
     if (rb) return ctx.relazy(probeKey(ctx, +rb.dataset.bmcRetry));
     const t = e.target.closest('[data-nic-toggle]');
     if (t) { const n = +t.dataset.nicToggle; ctx.ui.nicOpen ??= new Set(); ctx.ui.nicOpen.has(n) ? ctx.ui.nicOpen.delete(n) : ctx.ui.nicOpen.add(n); return ctx.rerender(); }
+    if (e.target.closest('[data-dpu-showall]')) { ctx.ui.dpuShowAll = !ctx.ui.dpuShowAll; return ctx.rerender(); }
     if (e.target.closest('[data-dpu-reload]')) { await loadMachines(true); ctx.reanalyze(); }
   },
 };
@@ -888,7 +897,8 @@ const HBN_CARD = {
   render(ctx) {
     const d = ctx.subnets, cur = ctx.eff('VTEP_CIDR');
     if (!d) return `<div class="muted small">${spin} Loading the HBN switch allocations…</div>`;
-    if (d.error) return `<div class="ov-issue error">${icon('alert', 'sm')}<span>Couldn't load the HBN switch allocations: ${esc(d.error)}</span></div>`;
+    if (d.error) return `<div class="ov-issue error">${icon('alert', 'sm')}<span>Couldn’t load the HBN switch allocations: ${esc(d.error)}</span></div>
+      <div class="ci-line" style="gap:6px;align-items:center"><span class="muted small">API base URL:</span><input class="input mono" data-sn-base value="${esc(d.base_url || '')}" placeholder="https://nvidia-lab.okoyl.xyz" style="flex:1"><button class="btn small" data-sn-base-save>Save</button>${d.base_url && d.base_url !== 'https://nvidia-lab.okoyl.xyz' ? '<button class="link-btn" data-sn-base-reset>Reset</button>' : ''}</div>`;
     const me = d.me || [];
     const slots = d.subnets.flatMap(sub => sub.slots.map(s => ({ ...s, subnet: sub.id })));
     const hosts = Math.max(ctx.workerCount(), 1);
@@ -910,25 +920,53 @@ const HBN_CARD = {
     const noneOpt = `<button class="slot-opt ${none ? 'on' : ''}" ${none ? 'aria-pressed="true"' : 'data-noslot'}>
         <span class="hv-radio"></span><span class="slot-none">No slot</span>
         <span class="muted small">the repo’s <span class="mono">${esc(ctx.row('VTEP_CIDR')?.default || '10.0.120.0/22')}</span>, not on the shared switch${ctx.workerCount() ? '' : ' (fine without DPU hosts)'}</span></button>`;
-    const list = `<div class="slot-opts">${options.map(o => `<button class="slot-opt ${o.cidr === cur ? 'on' : ''}" ${o.cidr === cur ? 'aria-pressed="true"' : `data-pick="${esc(o.cidr)}"`}>
+    const staleOpt = cur && !none && !curOpt ? `<button class="slot-opt on" aria-pressed="true" data-noslot>
+          <span class="hv-radio"></span><span class="mono">${esc(cur)}</span>
+          <span class="ci-bad-text small">${curSlot ? (curSlot.owner ? 'not your slot' : 'free, not yours') : 'not on the shared switch'}</span></button>` : '';
+    const list = `<div class="slot-opts">${staleOpt}${options.map(o => `<button class="slot-opt ${o.cidr === cur ? 'on' : ''}" ${o.cidr === cur ? 'aria-pressed="true"' : `data-pick="${esc(o.cidr)}"`}>
           <span class="hv-radio"></span><span class="dpu-users">${userAvatars(o.owners, me)}</span><span class="mono">${esc(o.cidr)}</span>
           <span class="muted small">${esc(o.what)} · room for ${o.room} DPU host${o.room > 1 ? 's' : ''}</span>
           ${o.room < hosts ? `<span class="ci-bad-text small">you picked ${hosts}</span>` : ''}</button>`).join('')}${noneOpt}</div>
       ${options.length ? '' : `<div class="muted small">${me.length ? `You (${me.map(m => '@' + esc(m)).join(', ')}) have no slot on the shared switch yet.` : 'Pick who you are (bottom of the sidebar) to see your slots.'}</div>`}`;
-    const request = d.request_url ? `<a class="btn small" href="${esc(d.request_url)}" target="_blank" rel="noopener" title="Opens the allocations file on GitHub; saving your edit there opens a pull request">${icon('github', 'sm')}Request a slot</a>${infoTip('Slots are handed out by pull request: add yourself to a free slot in the allocations file and open the PR.')}` : '';
+    const request = d.source_url ? `<a class="btn small" href="${esc(d.source_url)}" target="_blank" rel="noopener">${icon('layers', 'sm')}Request a slot</a>` : '';
 
-    const srcLabel = (d.source || '').startsWith('github:') ? d.source.slice(7) : (d.source || '').replace(/^\/home\/[^/]+/, '~');
     const all = ctx.ui.hbnAll;
-    return `<div class="ci-status hbn-status">${status}${infoTip('Your share of the shared HBN switch: VTEP addresses for OVN/HBN on the high-speed fabric, a /29 per DPU host. Slots are handed out by pull request to dpf-allocations.')}</div>
+    return `<div class="ci-status hbn-status">${status}${infoTip('Your share of the shared HBN switch: VTEP addresses for OVN/HBN on the high-speed fabric, a /29 per DPU host.')}</div>
       ${list}
-      <div class="ci-line">${request}<button class="link-btn" data-hbn-all>${icon(all ? 'minus' : 'layers', 'sm')}${all ? 'Hide' : 'Show'} the whole switch</button>
+      <div class="ci-line">${request}<button class="link-btn" data-hbn-all>${icon(all ? 'minus' : 'layers', 'sm')}${all ? 'Hide' : 'Show'} the whole switch</button> <button class="link-btn" data-hbn-reload>${icon('refresh', 'sm')}reload</button>
 </div>
-      ${all ? `${slotGridHtml(d, cur)}<div class="sn-foot muted small"><span>From <span class="mono">${esc(srcLabel)}</span></span></div>` : ''}`;
+      ${all ? slotGridHtml(d, cur) : ''}
+      <div class="sn-foot muted small" style="gap:6px;align-items:center"><span>API:</span><input class="input mono small" data-sn-base value="${esc(d.base_url || '')}" placeholder="https://nvidia-lab.okoyl.xyz" style="flex:1"><button class="btn small" data-sn-base-save>Save</button>${d.base_url && d.base_url !== 'https://nvidia-lab.okoyl.xyz' ? '<button class="link-btn" data-sn-base-reset>Reset</button>' : ''}</div>`;
   },
-  click(e, ctx) {
+  async click(e, ctx) {
+    if (e.target.closest('[data-sn-base-reset]')) {
+      try {
+        await api('PUT', '/api/subnets/base-url', { url: null });
+        S.subnets = null;
+        await loadSubnets(true);
+        ctx.rerender();
+      } catch (err) { toast(err.message, 'bad'); }
+      return;
+    }
+    if (e.target.closest('[data-sn-base-save]')) {
+      const inp = e.target.closest('.ci-line')?.querySelector('[data-sn-base]');
+      if (!inp) return;
+      try {
+        await api('PUT', '/api/subnets/base-url', { url: inp.value });
+        S.subnets = null;
+        await loadSubnets(true);
+        ctx.rerender();
+      } catch (err) { toast(err.message, 'bad'); }
+      return;
+    }
+    if (e.target.closest('[data-hbn-reload]')) { S.subnets = null; await loadSubnets(true); return ctx.rerender(); }
     if (e.target.closest('[data-hbn-all]')) { ctx.ui.hbnAll = !ctx.ui.hbnAll; return ctx.rerender(); }
     const pick = e.target.closest('[data-pick]');
-    if (pick) return ctx.set({ VTEP_CIDR: pick.dataset.pick });
+    if (pick) {
+      const owner = pick.dataset.pickOwner, me = ctx.subnets?.me || [];
+      if (owner && !me.includes(owner) && !window.confirm(`${pick.dataset.pick} is allocated to @${owner}. Use it anyway?`)) return;
+      return ctx.set({ VTEP_CIDR: pick.dataset.pick });
+    }
     if (e.target.closest('[data-noslot]')) return ctx.reset('VTEP_CIDR');
   },
 };
